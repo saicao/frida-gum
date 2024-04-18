@@ -9,6 +9,7 @@
  * Licence: wxWindows Library Licence, Version 3.1
  */
 
+#include "capstone.h"
 #ifndef GUM_DIET
 
 #include "gumstalker.h"
@@ -770,11 +771,73 @@ static GPrivate gum_stalker_exec_ctx_private;
 static gpointer gum_unfollow_me_address;
 static gpointer gum_deactivate_address;
 static gpointer gum_thread_exit_address;
+// struct _Arm64SystemRegs{
+//   //sve
+//   guint64 fpsr;
+//   guint64 fpcr;
+// };
+
+
+// typedef struct _Arm64SystemRegs Arm64SystemRegs ;
+#define MRS(name, reg) __asm__  ("mrs %0," #name "\n\t" : "=r"(reg) : :"memory")
+void gum_stalker_get_system_regs (Arm64SystemRegs * regs)
+{
+  MRS(fpsr, regs->fpsr);
+  MRS(fpcr, regs->fpcr);
+};
 
 #ifdef HAVE_LINUX
 static GumInterceptor * gum_exec_ctx_interceptor = NULL;
 #endif
+static void gum_dump_exec_block(GumExecCtx * ctx);
+static void gum_dump_exec_block(GumExecCtx * ctx)
+{
+  
+  if(ctx->current_block==NULL){
+    return;
+  }
+  g_debug("%p=>%p",ctx->current_block->real_start,ctx->current_block->code_start);
+  // csh cap=ctx->relocator.capstone;
+  // gsize size;
+  // guint8 * code;
+  // code=ctx->current_block->real_start;
+  // size=ctx->current_block->real_size;
+ 
+  // cs_insn * insn;
+  // gsize count=0;
+  // g_debug("========dump trans=====");
+  
+  // // code=ctx->current_block->code_slab;
+  // // size=ctx->current_block->;
+  // g_debug("code size:%lu",size);
+  // count=cs_disasm(cap ,code, size, code, 0, &insn);
+  // for(gsize i=0;i<count;i++){
+  //   g_debug("%llx:%s %s",insn[i].address,insn[i].mnemonic,insn[i].op_str);
+  // }
+  // cs_free( insn, count);
+  // g_debug("------------------");
+  // code=ctx->current_block->code_start;
+  // size=ctx->current_block->code_size;
+  // count=cs_disasm(cap ,code, size, code, 0, &insn);
+  // for(gsize i=0;i<count;i++){
+  //   g_debug("%llx:%s %s",insn[i].address,insn[i].mnemonic,insn[i].op_str);
+  // }
+  // cs_free( insn, count);
+  // g_debug("========dump end======");
+}
+static void gum_dump_inst(GumExecCtx * ctx,guint8 * strat,gsize size);
 
+void gum_dump_inst(GumExecCtx * ctx,guint8 * strat,gsize size){
+    csh cap=ctx->relocator.capstone;
+    cs_insn * insn;
+    g_debug("======dump inst base:%llx size:%lu=======",strat,size);
+    gsize count=cs_disasm(cap ,strat, size, strat, 0, &insn);
+    for(gsize i=0;i<count;i++){
+      g_debug("%llx:%s %s",insn[i].address,insn[i].mnemonic,insn[i].op_str);
+    }
+    cs_free( insn, count);
+    g_debug("======dump inst end=======");
+}
 gboolean
 gum_stalker_is_supported (void)
 {
@@ -1273,6 +1336,7 @@ _gum_stalker_do_follow_me (GumStalker * self,
                            GumEventSink * sink,
                            gpointer ret_addr)
 {
+  g_debug("_gum_stalker_do_follow_me ");
   GumExecCtx * ctx;
   gpointer code_address;
 
@@ -1291,7 +1355,7 @@ _gum_stalker_do_follow_me (GumStalker * self,
 
   gum_event_sink_start (ctx->sink);
   ctx->sink_started = TRUE;
-
+  g_debug("_gum_stalker_do_follow_me done ");
   return code_address + GUM_RESTORATION_PROLOG_SIZE;
 }
 
@@ -1326,6 +1390,7 @@ gum_stalker_follow (GumStalker * self,
                     GumStalkerTransformer * transformer,
                     GumEventSink * sink)
 {
+  g_debug("gum_stalker_follow");
   if (thread_id == gum_process_get_current_thread_id ())
   {
     gum_stalker_follow_me (self, transformer, sink);
@@ -1337,7 +1402,7 @@ gum_stalker_follow (GumStalker * self,
     ctx.stalker = self;
     ctx.transformer = transformer;
     ctx.sink = sink;
-
+    
     gum_process_modify_thread (thread_id, gum_stalker_infect, &ctx,
         GUM_MODIFY_THREAD_FLAGS_NONE);
   }
@@ -1384,6 +1449,7 @@ gum_stalker_infect (GumThreadId thread_id,
                     GumCpuContext * cpu_context,
                     gpointer user_data)
 {
+  g_debug("gum_stalker_infect");
   GumInfectContext * infect_context = user_data;
   GumStalker * self = infect_context->stalker;
   GumExecCtx * ctx;
@@ -1468,6 +1534,7 @@ _gum_stalker_do_activate (GumStalker * self,
                           gconstpointer target,
                           gpointer ret_addr)
 {
+  g_debug("_gum_stalker_do_activate");
   GumExecCtx * ctx;
 
   ctx = gum_stalker_get_exec_ctx ();
@@ -2456,8 +2523,9 @@ gum_exec_ctx_switch_block (GumExecCtx * ctx,
    */
   gum_exec_ctx_query_block_switch_callback (ctx, block, start_address,
       from_insn, &ctx->resume_at);
-
+  // gum_dump_exec_block(ctx);
   return ctx->resume_at;
+  
 }
 
 static void
@@ -2552,7 +2620,8 @@ gum_exec_ctx_obtain_block_for (GumExecCtx * ctx,
   }
 
   *code_address = block->code_start;
-
+  g_debug("gum_exec_ctx_obtain_block_for  %p \n",*code_address);
+  gum_dump_exec_block(ctx);
   return block;
 }
 
@@ -2698,6 +2767,7 @@ gum_exec_ctx_compile_block (GumExecCtx * ctx,
                             guint * output_size,
                             guint * slow_size)
 {
+  g_debug("gum_exec_ctx_compile_block ");
   GumArm64Writer * cw = &ctx->code_writer;
   GumArm64Writer * cws = &ctx->slow_writer;
   GumArm64Relocator * rl = &ctx->relocator;
@@ -2754,7 +2824,6 @@ gum_exec_ctx_compile_block (GumExecCtx * ctx,
     gum_exec_block_write_jmp_transfer_code (block, &continue_target,
         GUM_ENTRYGATE (jmp_continuation), &gc);
   }
-
   gum_arm64_writer_put_brk_imm (cw, 14);
 
   all_labels_resolved = gum_arm64_writer_flush (cw);
@@ -2768,6 +2837,7 @@ gum_exec_ctx_compile_block (GumExecCtx * ctx,
   *input_size = rl->input_cur - rl->input_start;
   *output_size = gum_arm64_writer_offset (cw);
   *slow_size = gum_arm64_writer_offset (cws);
+  g_debug("gum_exec_ctx_compile_block done");
 }
 
 static void
@@ -5628,7 +5698,7 @@ gum_exec_block_open_prolog (GumExecBlock * block,
   g_assert (gc->opened_prolog == GUM_PROLOG_NONE);
 
   gc->opened_prolog = type;
-
+  
   gum_exec_ctx_write_prolog (block->ctx, type, cw);
 }
 

@@ -228,7 +228,12 @@ GUM_API GumMemoryAccess gum_stalker_iterator_get_memory_access (
 GUM_API void gum_stalker_iterator_put_callout (GumStalkerIterator * self,
     GumStalkerCallout callout, gpointer data, GDestroyNotify data_destroy);
 GUM_API csh gum_stalker_iterator_get_capstone (GumStalkerIterator * self);
-
+typedef struct _Arm64SystemRegs Arm64SystemRegs;
+struct _Arm64SystemRegs{
+  guint64 fpsr;
+  guint64 fpcr;
+};
+GUM_API void gum_stalker_get_system_regs (Arm64SystemRegs * regs);
 #define GUM_DECLARE_OBSERVER_INCREMENT(name) \
     GUM_API void gum_stalker_observer_increment_##name ( \
         GumStalkerObserver * observer);

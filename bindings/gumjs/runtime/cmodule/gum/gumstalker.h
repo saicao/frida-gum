@@ -140,4 +140,12 @@ void gum_stalker_iterator_put_callout (GumStalkerIterator * self,
     GumStalkerCallout callout, gpointer data, GDestroyNotify data_destroy);
 csh gum_stalker_iterator_get_capstone (GumStalkerIterator * self);
 
+
+typedef struct _Arm64SystemRegs Arm64SystemRegs;
+struct _Arm64SystemRegs{
+  guint64 fpsr;
+  guint64 fpcr;
+};
+void gum_stalker_get_system_regs (Arm64SystemRegs * regs);
+
 #endif

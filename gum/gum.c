@@ -7,6 +7,7 @@
 
 #include "gum.h"
 
+#include "glib/gprintf.h"
 #include "gum-init.h"
 #include "gumexceptorbackend.h"
 #include "guminterceptor-priv.h"
@@ -126,7 +127,7 @@ static GPrivate gum_internal_thread_details_key = G_PRIVATE_INIT (
 #endif
 
 static GumInterceptor * gum_cached_interceptor = NULL;
-
+static FILE * log_file=NULL;
 G_DEFINE_QUARK (gum-error-quark, gum_error)
 
 GUM_DEFINE_BOXED_TYPE (GumAddress, gum_address, gum_address_copy,
@@ -165,6 +166,9 @@ gum_deinit (void)
   gum_final_destructors = NULL;
 
   _gum_interceptor_deinit ();
+
+  if(log_file!=NULL)
+    fclose(log_file);
 
   gum_initialized = FALSE;
 }
@@ -221,6 +225,7 @@ gum_destructor_invoke (GumDestructorFunc destructor)
 void
 gum_init_embedded (void)
 {
+  
 #if !defined (GUM_USE_SYSTEM_ALLOC) && defined (HAVE_FRIDA_LIBFFI)
   ffi_mem_callbacks ffi_callbacks = {
     (void * (*) (size_t)) gum_malloc,
@@ -302,7 +307,15 @@ gum_init_embedded (void)
 #ifdef HAVE_FRIDA_GLIB
   glib_init ();
 #endif
-  g_log_set_default_handler (gum_on_log_message, NULL);
+
+  char name[128];
+  g_sprintf(name, "/var/jb/var/root/log/frida_log_%d",getpid());
+  log_file=fopen(name, "w+");
+  if(log_file!=NULL){
+    int fd=fileno(log_file);
+    gum_cloak_add_file_descriptor(fd);
+  }
+  g_log_set_default_handler (gum_on_log_message, log_file);
   gum_do_init ();
 
   g_set_prgname ("frida");
@@ -506,7 +519,6 @@ gum_on_log_message (const gchar * log_domain,
 # ifdef HAVE_DARWIN
   static gsize api_value = 0;
   GumCFApi * api;
-
   if (g_once_init_enter (&api_value))
   {
     const gchar * cf_path = "/System/Library/Frameworks/"
@@ -639,7 +651,8 @@ gum_on_log_message (const gchar * log_domain,
     default:
       g_assert_not_reached ();
   }
-
+  if(user_data!=NULL)
+    file=user_data;
   fprintf (file, "[%s %s] %s\n", log_domain, severity, message);
   fflush (file);
 #endif
