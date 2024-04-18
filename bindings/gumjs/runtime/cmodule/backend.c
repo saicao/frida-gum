@@ -1,10 +1,10 @@
 #include "json-glib/json-glib.h"
 #include <gum/gummodulemap.h>
 #include <gum/gumstalker.h>
+#include <stdio.h>
 #include <string.h>
 
 #define RED_ZONE_SIZE 128
-#define MRS(name, reg) __asm__("mrs " #name ",%0\n\t" : "=r"(reg) : :)
 #define SCRATCH_REG_BOTTOM ARM64_REG_X21
 #define SCRATCH_REG_TOP ARM64_REG_X28
 
@@ -210,9 +210,7 @@ void transform(GumStalkerIterator *iterator, GumStalkerOutput *output,
     }
 
     gum_stalker_iterator_keep(iterator);
-    if( *((guint*) (insn->bytes))==0xfd46ad21){
-        gum_arm64_writer_put_brk_imm(cw, 0x14);
-    }
+
     // last block 不需要抓寄存器
     if (is_last_in_block)
       continue;
@@ -285,18 +283,28 @@ void transform(GumStalkerIterator *iterator, GumStalkerOutput *output,
         gum_arm64_writer_put_mov_reg_nzcv(cw, temp_reg);
 
       gsize offset = G_STRUCT_OFFSET(ITraceSession, log_buf) + log_buf_offset;
-      //gsize alignment_delta = offset % size;
-    //   if (alignment_delta != 0)
-    //     offset += size - alignment_delta;
-      if (offset > 1<<9){
-        js_log("over max str offset %lu",size);
-        while (1);
+      gsize alignment_delta = offset % size;
+      guint paddings=0;
+      if (alignment_delta != 0){
+            paddings=size - alignment_delta;
+            offset += paddings;
       }
+          
+      if (offset > 1 << 12) {
+        js_log("over max str offset %lu", size);
+        while (1)
+          ;
+      }
+      
       // TODO: Handle large offsets
       gum_arm64_writer_put_str_reg_reg_offset(cw, source_reg, session_reg,
                                               offset);
+    //   if (*((guint *)(insn->bytes)) == 0xfd46ad21) {
+    //     printf("offset %lu log buf %u\n" ,offset,log_buf_offset);
+    //     gum_arm64_writer_put_brk_imm(cw, 0x14);
+    //   }
       add_block_write_meta(meta, block_offset, cpu_reg_index);
-      log_buf_offset += size;
+      log_buf_offset += paddings+size;
 
       if (temp_reg != ARM64_REG_INVALID)
         gum_arm64_writer_put_ldr_reg_reg_offset(
@@ -358,8 +366,6 @@ void transform(GumStalkerIterator *iterator, GumStalkerOutput *output,
   on_compile(json);
   g_free(json);
 }
-
-
 
 static void on_first_block_hit(GumCpuContext *cpu_context, gpointer user_data) {
   if (session.state != ITRACE_STATE_STARTING)
