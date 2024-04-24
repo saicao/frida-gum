@@ -7,10 +7,12 @@
 #define RED_ZONE_SIZE 128
 #define SCRATCH_REG_BOTTOM ARM64_REG_X21
 #define SCRATCH_REG_TOP ARM64_REG_X28
-
+#define ABORT()                                                                \
+  int *__abort_at_here__ = NULL;                                               \
+  *__abort_at_here__ = 1
 #define SCRATCH_REG_INDEX(r) ((r)-SCRATCH_REG_BOTTOM)
 #define SCRATCH_REG_OFFSET(r) (SCRATCH_REG_INDEX(r) * 8)
-
+#define CS_INS_UINT32(cs_insn) *((gint32 *)(cs_insn->bytes))
 typedef enum _ITraceState ITraceState;
 typedef struct _ITraceSession ITraceSession;
 typedef struct _ITraceBuffer ITraceBuffer;
@@ -53,7 +55,9 @@ static arm64_reg pick_scratch_register(cs_regs regs_read, uint8_t num_regs_read,
                                        uint8_t num_regs_written);
 static arm64_reg register_to_full_size_register(arm64_reg reg);
 static void emit_scratch_register_restore(GumArm64Writer *cw, arm64_reg reg);
-
+static cs_err atomic_regs_access(const cs_insn *insn, cs_regs regs_read,
+                                 uint8_t *regs_read_count, cs_regs regs_write,
+                                 uint8_t *regs_write_count);
 static void js_log(const char *format, ...);
 // 如果所有的都正确的话，我们不需要这些。
 // javascript 只支持 48bit
@@ -64,6 +68,7 @@ static void on_block_exec(GumCpuContext *cpu_context, gpointer user_data) {
   js_on_block_exec(cpu_context, sizeof(GumCpuContext), session.log_buf,
                    session.pending_size);
 };
+static inline uint32_t extract32(uint32_t value, int start, int length);
 void init(void) {
   session.modules = gum_module_map_new();
   // js_log("session %p",&session);
@@ -85,11 +90,32 @@ cs_err regs_access(csh ud, const cs_insn *insn, cs_regs regs_read,
       regs_write[*regs_write_count] = reg;
       *regs_write_count = *regs_write_count + 1;
     }
-    err = CS_ERR_OK;
-  } else {
-    err = cs_regs_access(ud, insn, regs_read, regs_read_count, regs_write,
-                         regs_write_count);
+    return CS_ERR_OK;
   }
+  // check and decode atomic
+  err = atomic_regs_access(insn, regs_read, regs_read_count, regs_write,
+                           regs_write_count);
+  if (err == CS_ERR_OK) {
+    return CS_ERR_OK;
+  }
+  //读编码表读烦了，这样写了
+//   switch (insn.id) {
+//     case ARM64_INS_CAS:
+//     case ARM64_INS_CASA:
+//     case ARM64_INS_CASAL:
+//     case ARM64_INS_CASL:
+//     regs_write[0]=insn.opreand[0]
+//     regs_write[1]=insn.opreand[2]
+//     *regs_write_count=2;
+//     regs_read[1]=opreand[1]
+//     *regs_read_count=1;
+//     return;
+//     break;
+//   }
+
+
+  err = cs_regs_access(ud, insn, regs_read, regs_read_count, regs_write,
+                       regs_write_count);
 
   return err;
 }
@@ -108,12 +134,14 @@ void transform(GumStalkerIterator *iterator, GumStalkerOutput *output,
   json_builder_begin_object(meta);
 
   cs_insn *insn;
-  while (gum_stalker_iterator_next(iterator, &insn)) {
-    num_instructions++;
 
+  gboolean is_last_in_block = false;
+  while (gum_stalker_iterator_next(iterator, &insn)) {
+
+    num_instructions++;
     gboolean is_first_in_block = num_instructions == 1;
-    gboolean is_last_in_block = cs_insn_group(capstone, insn, CS_GRP_JUMP) ||
-                                cs_insn_group(capstone, insn, CS_GRP_RET);
+    is_last_in_block = cs_insn_group(capstone, insn, CS_GRP_JUMP) ||
+                       cs_insn_group(capstone, insn, CS_GRP_RET);
     if (session.state == ITRACE_STATE_CREATED) {
       session.state = ITRACE_STATE_STARTING;
       gum_stalker_iterator_put_callout(iterator, on_first_block_hit, NULL,
@@ -138,10 +166,13 @@ void transform(GumStalkerIterator *iterator, GumStalkerOutput *output,
 
     regs_access(capstone, insn, regs_read, &num_regs_read, regs_written,
                 &num_regs_written);
-    for (uint8_t i = 0; i != num_regs_read; i++)
+    for (uint8_t i = 0; i != num_regs_read; i++) {
       regs_read[i] = register_to_full_size_register(regs_read[i]);
-    for (uint8_t i = 0; i != num_regs_written; i++)
+    }
+
+    for (uint8_t i = 0; i != num_regs_written; i++) {
       regs_written[i] = register_to_full_size_register(regs_written[i]);
+    }
 
     arm64_reg session_reg =
         is_last_in_block
@@ -284,27 +315,27 @@ void transform(GumStalkerIterator *iterator, GumStalkerOutput *output,
 
       gsize offset = G_STRUCT_OFFSET(ITraceSession, log_buf) + log_buf_offset;
       gsize alignment_delta = offset % size;
-      guint paddings=0;
-      if (alignment_delta != 0){
-            paddings=size - alignment_delta;
-            offset += paddings;
+      guint paddings = 0;
+      if (alignment_delta != 0) {
+        paddings = size - alignment_delta;
+        offset += paddings;
       }
-          
+
       if (offset > 1 << 12) {
         js_log("over max str offset %lu", size);
         while (1)
           ;
       }
-      
+
       // TODO: Handle large offsets
       gum_arm64_writer_put_str_reg_reg_offset(cw, source_reg, session_reg,
                                               offset);
-    //   if (*((guint *)(insn->bytes)) == 0xfd46ad21) {
-    //     printf("offset %lu log buf %u\n" ,offset,log_buf_offset);
-    //     gum_arm64_writer_put_brk_imm(cw, 0x14);
-    //   }
+      //   if (*((guint *)(insn->bytes)) == 0xfd46ad21) {
+      //     printf("offset %lu log buf %u\n" ,offset,log_buf_offset);
+      //     gum_arm64_writer_put_brk_imm(cw, 0x14);
+      //   }
       add_block_write_meta(meta, block_offset, cpu_reg_index);
-      log_buf_offset += paddings+size;
+      log_buf_offset += paddings + size;
 
       if (temp_reg != ARM64_REG_INVALID)
         gum_arm64_writer_put_ldr_reg_reg_offset(
@@ -313,6 +344,9 @@ void transform(GumStalkerIterator *iterator, GumStalkerOutput *output,
     }
 
     prev_session_reg = session_reg;
+    // if (insn->id == ARM64_INS_LDADDAL) {
+    //     ABORT();
+    // }
   }
 
   json_builder_end_array(meta);
@@ -363,8 +397,43 @@ void transform(GumStalkerIterator *iterator, GumStalkerOutput *output,
   json_builder_end_object(meta);
 
   gchar *json = make_json(&meta);
+
   on_compile(json);
-  g_free(json);
+ 
+
+  if (!is_last_in_block) {
+    arm64_reg session_reg=SCRATCH_REG_TOP;
+    //reg_header
+    gum_arm64_writer_put_ldr_reg_address(cw, session_reg,
+                                             GUM_ADDRESS(&session));
+    gum_arm64_writer_put_stp_reg_reg_reg_offset(
+    cw, ARM64_REG_X27, ARM64_REG_LR, session_reg,
+    G_STRUCT_OFFSET(ITraceSession, saved_regs), GUM_INDEX_SIGNED_OFFSET);
+      // 我们知道offset 在runtime之前，但是要保存此值 mov
+      // log_buf_offset，将block信息写入指令中。
+      gum_arm64_writer_put_ldr_reg_u64(cw, ARM64_REG_X27, block_address);
+      gum_arm64_writer_put_str_reg_reg_offset(
+          cw, ARM64_REG_X27, session_reg,
+          G_STRUCT_OFFSET(ITraceSession, log_buf));
+      // 我们知道offset 在runtime之前，但是要保存此值 mov
+      // log_buf_offset，将block信息写入指令中。
+      gum_arm64_writer_put_ldr_reg_u64(cw, ARM64_REG_X27, log_buf_offset);
+
+      gum_arm64_writer_put_str_reg_reg_offset(
+          cw, ARM64_REG_X27, session_reg,
+          G_STRUCT_OFFSET(ITraceSession, pending_size));
+      gum_arm64_writer_put_ldp_reg_reg_reg_offset(
+          cw, ARM64_REG_X27, ARM64_REG_LR, session_reg,
+          G_STRUCT_OFFSET(ITraceSession, saved_regs), GUM_INDEX_SIGNED_OFFSET);
+      emit_scratch_register_restore(cw, session_reg);
+    
+    // printf("\n%s\n",json);
+    
+    // printf("\n next address %llx %s %s\n",insn->address,insn->mnemonic,insn->op_str);
+    
+    //ABORT();
+  };
+   g_free(json);
 }
 
 static void on_first_block_hit(GumCpuContext *cpu_context, gpointer user_data) {
@@ -497,6 +566,7 @@ static arm64_reg pick_scratch_register(cs_regs regs_read, uint8_t num_regs_read,
 }
 
 static arm64_reg register_to_full_size_register(arm64_reg reg) {
+
   switch (reg) {
   case ARM64_REG_SP:
   case ARM64_REG_FP:
@@ -547,4 +617,90 @@ static void js_log(const char *format, ...) {
   on_js_log(message);
 
   g_free(message);
+}
+/**
+ * extract32:
+ * @value: the value to extract the bit field from
+ * @start: the lowest bit in the bit field (numbered from 0)
+ * @length: the length of the bit field
+ *
+ * Extract from the 32 bit input @value the bit field specified by the
+ * @start and @length parameters, and return it. The bit field must
+ * lie entirely within the 32 bit word. It is valid to request that
+ * all 32 bits are returned (ie @length 32 and @start 0).
+ *
+ * Returns: the value of the bit field extracted from the input value.
+ */
+static inline uint32_t extract32(uint32_t value, int start, int length) {
+  return (value >> start) & (~0U >> (32 - length));
+}
+
+static inline int operand_to_cs_reg_id(guint operand, gboolean v) {
+  guint32 ret = ARM64_REG_INVALID;
+  guint32 reg_base = v ? ARM64_REG_Q0 : ARM64_REG_X0;
+  ret = reg_base + operand;
+  return ret;
+}
+
+/* Atomic memory operations
+ *
+ *  31  30      27  26    24    22  21   16   15    12    10    5     0
+ * +------+-------+---+-----+-----+---+----+----+-----+-----+----+-----+
+ * | size | 1 1 1 | V | 0 0 | A R | 1 | Rs | o3 | opc | 0 0 | Rn |  Rt |
+ * +------+-------+---+-----+-----+--------+----+-----+-----+----+-----+
+ *
+ * Rt: the result register
+ * Rn: base address or SP
+ * Rs: the source register for the operation
+ * V: vector flag (always 0 as of v8.3)
+ * A: acquire flag
+ * R: release flag
+ */
+static cs_err atomic_regs_access(const cs_insn *cs_insn, cs_regs regs_read,
+                                 uint8_t *regs_read_count, cs_regs regs_write,
+                                 uint8_t *regs_write_count) {
+
+  guint32 insn = CS_INS_UINT32(cs_insn);
+
+  // is lse_atmoic_read
+  if (!(extract32(insn, 27, 3) == 0x7 && extract32(insn, 24, 2) == 0x0 &&
+        extract32(insn, 21, 1) == 0x1 && extract32(insn, 10, 2) == 0)) {
+    return CS_ERR_DETAIL;
+  }
+
+  int rt = extract32(insn, 0, 5);
+  int rs = extract32(insn, 16, 5);
+  int rn = extract32(insn, 5, 5);
+  int o3_opc = extract32(insn, 12, 4);
+  bool r = extract32(insn, 22, 1);
+  bool a = extract32(insn, 23, 1);
+  bool v = extract32(insn, 26, 1);
+  switch (o3_opc) {
+  case 000: /* LDADD */
+  case 001: /* LDCLR */
+  case 002: /* LDEOR */
+  case 003: /* LDSET */
+  case 004: /* LDSMAX */
+  case 005: /* LDSMIN */
+  case 006: /* LDUMAX */
+  case 007: /* LDUMIN */
+  case 010: /* SWP */
+    regs_read[0] = operand_to_cs_reg_id(rs, v);
+    regs_read[1] = operand_to_cs_reg_id(rn, v);
+    regs_write[0] = operand_to_cs_reg_id(rt, v);
+    *regs_read_count = 2;
+    *regs_write_count = 1;
+    break;
+  case 014: /* LDAPR, LDAPRH, LDAPRB */
+    // ok for capstone
+    //  regs_read[0] = operand_to_cs_reg_id(rn, v);
+
+    // regs_write[1] = operand_to_cs_reg_id(rt, v);
+    // *regs_read_count = 1;
+    // *regs_write_count = 1;
+    break;
+  default:
+    return CS_ERR_DETAIL;
+  }
+  return CS_ERR_OK;
 }
