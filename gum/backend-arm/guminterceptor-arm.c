@@ -472,14 +472,14 @@ gum_interceptor_backend_emit_thumb_trampolines (GumInterceptorBackend * self,
         gum_thumb_writer_put_push_regs_array (tw, saved_regs->len,
             (const arm_reg *) saved_regs->data);
         gum_thumb_writer_put_mrs_reg_reg (tw, nzcvq_reg,
-            ARM_SYSREG_APSR_NZCVQ);
+            ARM_MCLASSSYSREG_APSR_NZCVQ);
 
         gum_thumb_writer_put_call_address_with_arguments (tw,
             GUM_ADDRESS (_gum_interceptor_translate_top_return_address), 1,
             GUM_ARG_REGISTER, ARM_REG_LR);
         gum_thumb_writer_put_mov_reg_reg (tw, dst_reg, ARM_REG_R0);
 
-        gum_thumb_writer_put_msr_reg_reg (tw, ARM_SYSREG_APSR_NZCVQ,
+        gum_thumb_writer_put_msr_reg_reg (tw, ARM_MCLASSSYSREG_APSR_NZCVQ,
             nzcvq_reg);
         gum_thumb_writer_put_pop_regs_array (tw, saved_regs->len,
             (const arm_reg *) saved_regs->data);

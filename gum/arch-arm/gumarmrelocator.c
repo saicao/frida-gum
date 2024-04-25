@@ -395,8 +395,8 @@ gum_arm_branch_is_unconditional (const cs_insn * insn)
 {
   switch (insn->detail->arm.cc)
   {
-    case ARM_CC_INVALID:
-    case ARM_CC_AL:
+    case ARMCC_UNDEF:
+    case ARMCC_AL:
       return TRUE;
     default:
       return FALSE;
@@ -435,12 +435,12 @@ gum_arm_relocator_rewrite_ldr (GumArmRelocator * self,
   if (src->type != ARM_OP_MEM || src->mem.base != ARM_REG_PC)
     return FALSE;
 
-  if (ctx->detail->writeback)
-  {
-    /* FIXME: LDR with writeback not yet supported. */
-    g_assert_not_reached ();
-    return FALSE;
-  }
+  // if (ctx->detail->writeback)
+  // {
+  //   /* FIXME: LDR with writeback not yet supported. */
+  //   g_assert_not_reached ();
+  //   return FALSE;
+  // }
 
   if (dst->reg == ARM_REG_PC)
   {

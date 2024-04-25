@@ -53,10 +53,10 @@ static void gum_emit_ldr_in_large_block (gpointer mem, gpointer user_data);
 
 TESTCASE (call_reg)
 {
-  gum_arm64_writer_put_call_reg_with_arguments (&fixture->aw, ARM64_REG_X3,
+  gum_arm64_writer_put_call_reg_with_arguments (&fixture->aw, AArch64_REG_X3,
       2,
-      GUM_ARG_REGISTER, ARM64_REG_X5,
-      GUM_ARG_REGISTER, ARM64_REG_W7);
+      GUM_ARG_REGISTER, AArch64_REG_X5,
+      GUM_ARG_REGISTER, AArch64_REG_W7);
   assert_output_n_equals (0, 0xd3407ce1); /* uxtw x1, w7 */
   assert_output_n_equals (1, 0xaa0503e0); /* mov x0, x5 */
   assert_output_n_equals (2, 0xd63f0060); /* blr x3 */
@@ -66,8 +66,8 @@ TESTCASE (cbz_reg_label)
 {
   const gchar * beach_lbl = "beach";
 
-  gum_arm64_writer_put_cbz_reg_label (&fixture->aw, ARM64_REG_W5, beach_lbl);
-  gum_arm64_writer_put_cbz_reg_label (&fixture->aw, ARM64_REG_X7, beach_lbl);
+  gum_arm64_writer_put_cbz_reg_label (&fixture->aw, AArch64_REG_W5, beach_lbl);
+  gum_arm64_writer_put_cbz_reg_label (&fixture->aw, AArch64_REG_X7, beach_lbl);
   gum_arm64_writer_put_brk_imm (&fixture->aw, 1);
   gum_arm64_writer_put_brk_imm (&fixture->aw, 2);
   gum_arm64_writer_put_brk_imm (&fixture->aw, 3);
@@ -96,11 +96,11 @@ TESTCASE (tbnz_reg_imm_imm)
 {
   GumAddress target = GUM_ADDRESS (fixture->aw.pc + 8);
 
-  gum_arm64_writer_put_tbnz_reg_imm_imm (&fixture->aw, ARM64_REG_X17, 0,
+  gum_arm64_writer_put_tbnz_reg_imm_imm (&fixture->aw, AArch64_REG_X17, 0,
       target);
   assert_output_n_equals (0, 0x37000051);
 
-  gum_arm64_writer_put_tbnz_reg_imm_imm (&fixture->aw, ARM64_REG_X17, 33,
+  gum_arm64_writer_put_tbnz_reg_imm_imm (&fixture->aw, AArch64_REG_X17, 33,
       target);
   assert_output_n_equals (1, 0xb7080031);
 }
@@ -169,13 +169,13 @@ TESTCASE (bl_label)
 
 TESTCASE (br_reg)
 {
-  gum_arm64_writer_put_br_reg (&fixture->aw, ARM64_REG_X3);
+  gum_arm64_writer_put_br_reg (&fixture->aw, AArch64_REG_X3);
   assert_output_n_equals (0, 0xd61f0060);
 }
 
 TESTCASE (blr_reg)
 {
-  gum_arm64_writer_put_blr_reg (&fixture->aw, ARM64_REG_X5);
+  gum_arm64_writer_put_blr_reg (&fixture->aw, AArch64_REG_X5);
   assert_output_n_equals (0, 0xd63f00a0);
 }
 
@@ -187,31 +187,31 @@ TESTCASE (ret)
 
 TESTCASE (push_reg_reg)
 {
-  gum_arm64_writer_put_push_reg_reg (&fixture->aw, ARM64_REG_X3, ARM64_REG_X5);
+  gum_arm64_writer_put_push_reg_reg (&fixture->aw, AArch64_REG_X3, AArch64_REG_X5);
   assert_output_n_equals (0, 0xa9bf17e3);
 
-  gum_arm64_writer_put_push_reg_reg (&fixture->aw, ARM64_REG_W3, ARM64_REG_W5);
+  gum_arm64_writer_put_push_reg_reg (&fixture->aw, AArch64_REG_W3, AArch64_REG_W5);
   assert_output_n_equals (1, 0x29bf17e3);
 
-  gum_arm64_writer_put_push_reg_reg (&fixture->aw, ARM64_REG_Q6, ARM64_REG_Q7);
+  gum_arm64_writer_put_push_reg_reg (&fixture->aw, AArch64_REG_Q6, AArch64_REG_Q7);
   assert_output_n_equals (2, 0xadbf1fe6);
 }
 
 TESTCASE (pop_reg_reg)
 {
-  gum_arm64_writer_put_pop_reg_reg (&fixture->aw, ARM64_REG_X7, ARM64_REG_X12);
+  gum_arm64_writer_put_pop_reg_reg (&fixture->aw, AArch64_REG_X7, AArch64_REG_X12);
   assert_output_n_equals (0, 0xa8c133e7);
 
-  gum_arm64_writer_put_pop_reg_reg (&fixture->aw, ARM64_REG_W7, ARM64_REG_W12);
+  gum_arm64_writer_put_pop_reg_reg (&fixture->aw, AArch64_REG_W7, AArch64_REG_W12);
   assert_output_n_equals (1, 0x28c133e7);
 
-  gum_arm64_writer_put_pop_reg_reg (&fixture->aw, ARM64_REG_Q6, ARM64_REG_Q7);
+  gum_arm64_writer_put_pop_reg_reg (&fixture->aw, AArch64_REG_Q6, AArch64_REG_Q7);
   assert_output_n_equals (2, 0xacc11fe6);
 }
 
 TESTCASE (ldr_x_address)
 {
-  gum_arm64_writer_put_ldr_reg_address (&fixture->aw, ARM64_REG_X7,
+  gum_arm64_writer_put_ldr_reg_address (&fixture->aw, AArch64_REG_X7,
       0x123456789abcdef0);
   gum_arm64_writer_flush (&fixture->aw);
   assert_output_n_equals (0, 0x58000027);
@@ -222,7 +222,7 @@ TESTCASE (ldr_x_address)
 
 TESTCASE (ldr_d_address)
 {
-  gum_arm64_writer_put_ldr_reg_address (&fixture->aw, ARM64_REG_D1,
+  gum_arm64_writer_put_ldr_reg_address (&fixture->aw, AArch64_REG_D1,
       0x123456789abcdef0);
   gum_arm64_writer_flush (&fixture->aw);
   assert_output_n_equals (0, 0x5c000021);
@@ -261,7 +261,7 @@ gum_emit_ldr_in_large_block (gpointer mem,
   gum_arm64_writer_init (&aw, mem);
   aw.pc = GUM_ADDRESS (code);
 
-  gum_arm64_writer_put_ldr_reg_address (&aw, ARM64_REG_X0, 0x1337);
+  gum_arm64_writer_put_ldr_reg_address (&aw, AArch64_REG_X0, 0x1337);
   for (i = 0; i != 262142; i++)
     gum_arm64_writer_put_nop (&aw);
   gum_arm64_writer_put_ret (&aw);
@@ -273,185 +273,185 @@ gum_emit_ldr_in_large_block (gpointer mem,
 
 TESTCASE (ldr_integer_reg_reg_imm)
 {
-  gum_arm64_writer_put_ldr_reg_reg_offset (&fixture->aw, ARM64_REG_X3,
-      ARM64_REG_X5, 16);
+  gum_arm64_writer_put_ldr_reg_reg_offset (&fixture->aw, AArch64_REG_X3,
+      AArch64_REG_X5, 16);
   assert_output_n_equals (0, 0xf94008a3);
 
-  gum_arm64_writer_put_ldr_reg_reg_offset (&fixture->aw, ARM64_REG_W3,
-      ARM64_REG_X5, 16);
+  gum_arm64_writer_put_ldr_reg_reg_offset (&fixture->aw, AArch64_REG_W3,
+      AArch64_REG_X5, 16);
   assert_output_n_equals (1, 0xb94010a3);
 }
 
 TESTCASE (ldr_integer_reg_reg_imm_mode)
 {
-  gum_arm64_writer_put_ldr_reg_reg_offset_mode (&fixture->aw, ARM64_REG_X3,
-      ARM64_REG_X5, 16, GUM_INDEX_POST_ADJUST);
+  gum_arm64_writer_put_ldr_reg_reg_offset_mode (&fixture->aw, AArch64_REG_X3,
+      AArch64_REG_X5, 16, GUM_INDEX_POST_ADJUST);
   assert_output_n_equals (0, 0xf84104a3);
 
-  gum_arm64_writer_put_ldr_reg_reg_offset_mode (&fixture->aw, ARM64_REG_W3,
-      ARM64_REG_X5, -16, GUM_INDEX_PRE_ADJUST);
+  gum_arm64_writer_put_ldr_reg_reg_offset_mode (&fixture->aw, AArch64_REG_W3,
+      AArch64_REG_X5, -16, GUM_INDEX_PRE_ADJUST);
   assert_output_n_equals (1, 0xb85f0ca3);
 }
 
 TESTCASE (ldr_fp_reg_reg_imm)
 {
-  gum_arm64_writer_put_ldr_reg_reg_offset (&fixture->aw, ARM64_REG_S3,
-      ARM64_REG_X7, 16);
+  gum_arm64_writer_put_ldr_reg_reg_offset (&fixture->aw, AArch64_REG_S3,
+      AArch64_REG_X7, 16);
   assert_output_n_equals (0, 0xbd4010e3);
 
-  gum_arm64_writer_put_ldr_reg_reg_offset (&fixture->aw, ARM64_REG_D3,
-      ARM64_REG_X7, 16);
+  gum_arm64_writer_put_ldr_reg_reg_offset (&fixture->aw, AArch64_REG_D3,
+      AArch64_REG_X7, 16);
   assert_output_n_equals (1, 0xfd4008e3);
 
-  gum_arm64_writer_put_ldr_reg_reg_offset (&fixture->aw, ARM64_REG_Q3,
-      ARM64_REG_X7, 16);
+  gum_arm64_writer_put_ldr_reg_reg_offset (&fixture->aw, AArch64_REG_Q3,
+      AArch64_REG_X7, 16);
   assert_output_n_equals (2, 0x3dc004e3);
 }
 
 TESTCASE (ldrsw_reg_reg_imm)
 {
-  gum_arm64_writer_put_ldrsw_reg_reg_offset (&fixture->aw, ARM64_REG_X3,
-      ARM64_REG_X5, 16);
+  gum_arm64_writer_put_ldrsw_reg_reg_offset (&fixture->aw, AArch64_REG_X3,
+      AArch64_REG_X5, 16);
   assert_output_n_equals (0, 0xb98010a3);
 }
 
 TESTCASE (str_integer_reg_reg_imm)
 {
-  gum_arm64_writer_put_str_reg_reg_offset (&fixture->aw, ARM64_REG_X3,
-      ARM64_REG_X5, 16);
+  gum_arm64_writer_put_str_reg_reg_offset (&fixture->aw, AArch64_REG_X3,
+      AArch64_REG_X5, 16);
   assert_output_n_equals (0, 0xf90008a3);
 
-  gum_arm64_writer_put_str_reg_reg_offset (&fixture->aw, ARM64_REG_W3,
-      ARM64_REG_X5, 16);
+  gum_arm64_writer_put_str_reg_reg_offset (&fixture->aw, AArch64_REG_W3,
+      AArch64_REG_X5, 16);
   assert_output_n_equals (1, 0xb90010a3);
 }
 
 TESTCASE (str_integer_reg_reg_imm_mode)
 {
-  gum_arm64_writer_put_str_reg_reg_offset_mode (&fixture->aw, ARM64_REG_X3,
-      ARM64_REG_X5, 16, GUM_INDEX_POST_ADJUST);
+  gum_arm64_writer_put_str_reg_reg_offset_mode (&fixture->aw, AArch64_REG_X3,
+      AArch64_REG_X5, 16, GUM_INDEX_POST_ADJUST);
   assert_output_n_equals (0, 0xf80104a3);
 
-  gum_arm64_writer_put_str_reg_reg_offset_mode (&fixture->aw, ARM64_REG_W3,
-      ARM64_REG_X5, -16, GUM_INDEX_PRE_ADJUST);
+  gum_arm64_writer_put_str_reg_reg_offset_mode (&fixture->aw, AArch64_REG_W3,
+      AArch64_REG_X5, -16, GUM_INDEX_PRE_ADJUST);
   assert_output_n_equals (1, 0xb81f0ca3);
 }
 
 TESTCASE (str_fp_reg_reg_imm)
 {
-  gum_arm64_writer_put_str_reg_reg_offset (&fixture->aw, ARM64_REG_S3,
-      ARM64_REG_X7, 16);
+  gum_arm64_writer_put_str_reg_reg_offset (&fixture->aw, AArch64_REG_S3,
+      AArch64_REG_X7, 16);
   assert_output_n_equals (0, 0xbd0010e3);
 
-  gum_arm64_writer_put_str_reg_reg_offset (&fixture->aw, ARM64_REG_D3,
-      ARM64_REG_X7, 16);
+  gum_arm64_writer_put_str_reg_reg_offset (&fixture->aw, AArch64_REG_D3,
+      AArch64_REG_X7, 16);
   assert_output_n_equals (1, 0xfd0008e3);
 
-  gum_arm64_writer_put_str_reg_reg_offset (&fixture->aw, ARM64_REG_Q3,
-      ARM64_REG_X7, 16);
+  gum_arm64_writer_put_str_reg_reg_offset (&fixture->aw, AArch64_REG_Q3,
+      AArch64_REG_X7, 16);
   assert_output_n_equals (2, 0x3d8004e3);
 }
 
 TESTCASE (mov_reg_reg)
 {
-  gum_arm64_writer_put_mov_reg_reg (&fixture->aw, ARM64_REG_X3, ARM64_REG_X5);
+  gum_arm64_writer_put_mov_reg_reg (&fixture->aw, AArch64_REG_X3, AArch64_REG_X5);
   assert_output_n_equals (0, 0xaa0503e3);
 
-  gum_arm64_writer_put_mov_reg_reg (&fixture->aw, ARM64_REG_W3, ARM64_REG_W5);
+  gum_arm64_writer_put_mov_reg_reg (&fixture->aw, AArch64_REG_W3, AArch64_REG_W5);
   assert_output_n_equals (1, 0x2a0503e3);
 
-  gum_arm64_writer_put_mov_reg_reg (&fixture->aw, ARM64_REG_X7, ARM64_REG_SP);
+  gum_arm64_writer_put_mov_reg_reg (&fixture->aw, AArch64_REG_X7, AArch64_REG_SP);
   assert_output_n_equals (2, 0x910003e7);
 
-  gum_arm64_writer_put_mov_reg_reg (&fixture->aw, ARM64_REG_SP, ARM64_REG_X12);
+  gum_arm64_writer_put_mov_reg_reg (&fixture->aw, AArch64_REG_SP, AArch64_REG_X12);
   assert_output_n_equals (3, 0x9100019f);
 
-  gum_arm64_writer_put_mov_reg_reg (&fixture->aw, ARM64_REG_X7, ARM64_REG_XZR);
+  gum_arm64_writer_put_mov_reg_reg (&fixture->aw, AArch64_REG_X7, AArch64_REG_XZR);
   assert_output_n_equals (4, 0xaa1f03e7);
 }
 
 TESTCASE (uxtw_reg_reg)
 {
-  gum_arm64_writer_put_uxtw_reg_reg (&fixture->aw, ARM64_REG_X3, ARM64_REG_W5);
+  gum_arm64_writer_put_uxtw_reg_reg (&fixture->aw, AArch64_REG_X3, AArch64_REG_W5);
   assert_output_n_equals (0, 0xd3407ca3);
 
-  gum_arm64_writer_put_uxtw_reg_reg (&fixture->aw, ARM64_REG_X7, ARM64_REG_W12);
+  gum_arm64_writer_put_uxtw_reg_reg (&fixture->aw, AArch64_REG_X7, AArch64_REG_W12);
   assert_output_n_equals (1, 0xd3407d87);
 }
 
 TESTCASE (add_reg_reg_imm)
 {
-  gum_arm64_writer_put_add_reg_reg_imm (&fixture->aw, ARM64_REG_X3,
-      ARM64_REG_X5, 7);
+  gum_arm64_writer_put_add_reg_reg_imm (&fixture->aw, AArch64_REG_X3,
+      AArch64_REG_X5, 7);
   assert_output_n_equals (0, 0x91001ca3);
 
-  gum_arm64_writer_put_add_reg_reg_imm (&fixture->aw, ARM64_REG_X7,
-      ARM64_REG_X12, 16);
+  gum_arm64_writer_put_add_reg_reg_imm (&fixture->aw, AArch64_REG_X7,
+      AArch64_REG_X12, 16);
   assert_output_n_equals (1, 0x91004187);
 
-  gum_arm64_writer_put_add_reg_reg_imm (&fixture->aw, ARM64_REG_W7,
-      ARM64_REG_W12, 16);
+  gum_arm64_writer_put_add_reg_reg_imm (&fixture->aw, AArch64_REG_W7,
+      AArch64_REG_W12, 16);
   assert_output_n_equals (2, 0x11004187);
 }
 
 TESTCASE (sub_reg_reg_imm)
 {
-  gum_arm64_writer_put_sub_reg_reg_imm (&fixture->aw, ARM64_REG_X3,
-      ARM64_REG_X5, 7);
+  gum_arm64_writer_put_sub_reg_reg_imm (&fixture->aw, AArch64_REG_X3,
+      AArch64_REG_X5, 7);
   assert_output_n_equals (0, 0xd1001ca3);
 
-  gum_arm64_writer_put_sub_reg_reg_imm (&fixture->aw, ARM64_REG_X7,
-      ARM64_REG_X12, 16);
+  gum_arm64_writer_put_sub_reg_reg_imm (&fixture->aw, AArch64_REG_X7,
+      AArch64_REG_X12, 16);
   assert_output_n_equals (1, 0xd1004187);
 
-  gum_arm64_writer_put_sub_reg_reg_imm (&fixture->aw, ARM64_REG_W7,
-      ARM64_REG_W12, 16);
+  gum_arm64_writer_put_sub_reg_reg_imm (&fixture->aw, AArch64_REG_W7,
+      AArch64_REG_W12, 16);
   assert_output_n_equals (2, 0x51004187);
 }
 
 TESTCASE (sub_reg_reg_reg)
 {
-  gum_arm64_writer_put_sub_reg_reg_reg (&fixture->aw, ARM64_REG_X3,
-      ARM64_REG_X5, ARM64_REG_X7);
+  gum_arm64_writer_put_sub_reg_reg_reg (&fixture->aw, AArch64_REG_X3,
+      AArch64_REG_X5, AArch64_REG_X7);
   assert_output_n_equals (0, 0xcb0700a3);
 }
 
 TESTCASE (and_reg_reg_imm)
 {
-  gum_arm64_writer_put_and_reg_reg_imm (&fixture->aw, ARM64_REG_X3,
-      ARM64_REG_X5, 63);
+  gum_arm64_writer_put_and_reg_reg_imm (&fixture->aw, AArch64_REG_X3,
+      AArch64_REG_X5, 63);
   assert_output_n_equals (0, 0x924014a3);
 }
 
 TESTCASE (and_reg_reg_neg_imm)
 {
-  gum_arm64_writer_put_and_reg_reg_imm (&fixture->aw, ARM64_REG_X0,
-      ARM64_REG_X0, (guint64) -0x10);
+  gum_arm64_writer_put_and_reg_reg_imm (&fixture->aw, AArch64_REG_X0,
+      AArch64_REG_X0, (guint64) -0x10);
   assert_output_n_equals (0, 0x927cec00);
 }
 
 TESTCASE (eor_reg_reg_reg)
 {
-  gum_arm64_writer_put_eor_reg_reg_reg (&fixture->aw, ARM64_REG_X3,
-      ARM64_REG_X5, ARM64_REG_X7);
+  gum_arm64_writer_put_eor_reg_reg_reg (&fixture->aw, AArch64_REG_X3,
+      AArch64_REG_X5, AArch64_REG_X7);
   assert_output_n_equals (0, 0xca0700a3);
 
-  gum_arm64_writer_put_eor_reg_reg_reg (&fixture->aw, ARM64_REG_W3,
-      ARM64_REG_W5, ARM64_REG_W7);
+  gum_arm64_writer_put_eor_reg_reg_reg (&fixture->aw, AArch64_REG_W3,
+      AArch64_REG_W5, AArch64_REG_W7);
   assert_output_n_equals (1, 0x4a0700a3);
 }
 
 TESTCASE (tst_reg_imm)
 {
-  gum_arm64_writer_put_tst_reg_imm (&fixture->aw, ARM64_REG_X3, 16383);
+  gum_arm64_writer_put_tst_reg_imm (&fixture->aw, AArch64_REG_X3, 16383);
   assert_output_n_equals (0, 0xf240347f);
 
-  gum_arm64_writer_put_tst_reg_imm (&fixture->aw, ARM64_REG_W7, 31);
+  gum_arm64_writer_put_tst_reg_imm (&fixture->aw, AArch64_REG_W7, 31);
   assert_output_n_equals (1, 0x720010ff);
 }
 
 TESTCASE (cmp_reg_reg)
 {
-  gum_arm64_writer_put_cmp_reg_reg (&fixture->aw, ARM64_REG_X3, ARM64_REG_X5);
+  gum_arm64_writer_put_cmp_reg_reg (&fixture->aw, AArch64_REG_X3, AArch64_REG_X5);
   assert_output_n_equals (0, 0xeb05007f);
 }

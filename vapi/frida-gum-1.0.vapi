@@ -2098,7 +2098,7 @@ namespace Gum {
 		public static uint relocate (void * from, uint min_bytes, void * to);
 	}
 
-	[CCode (cname = "arm64_reg", cprefix = "ARM64_REG_")]
+	[CCode (cname = "aarch64_reg", cprefix = "AArch64_REG_")]
 	public enum Arm64Reg {
 		INVALID,
 		FFR,
@@ -2448,7 +2448,7 @@ namespace Gum {
 		X30,
 	}
 
-	[CCode (cname = "arm64_cc", cprefix = "ARM64_CC_")]
+	[CCode (cname = "AArch64CC_CondCode", cprefix = "AArch64CC_")]
 	public enum Arm64ConditionCode {
 		INVALID,
 		EQ,

@@ -75,11 +75,11 @@ GUM_API gboolean gum_arm_writer_can_branch_directly_between (
 GUM_API gboolean gum_arm_writer_put_b_imm (GumArmWriter * self,
     GumAddress target);
 GUM_API gboolean gum_arm_writer_put_b_cond_imm (GumArmWriter * self,
-    arm_cc cc, GumAddress target);
+    ARMCC_CondCodes cc, GumAddress target);
 GUM_API void gum_arm_writer_put_b_label (GumArmWriter * self,
     gconstpointer label_id);
 GUM_API void gum_arm_writer_put_b_cond_label (GumArmWriter * self,
-    arm_cc cc, gconstpointer label_id);
+    ARMCC_CondCodes cc, gconstpointer label_id);
 GUM_API gboolean gum_arm_writer_put_bl_imm (GumArmWriter * self,
     GumAddress target);
 GUM_API gboolean gum_arm_writer_put_blx_imm (GumArmWriter * self,
@@ -107,7 +107,7 @@ GUM_API gboolean gum_arm_writer_put_ldr_reg_reg (GumArmWriter * self,
 GUM_API gboolean gum_arm_writer_put_ldr_reg_reg_offset (GumArmWriter * self,
     arm_reg dst_reg, arm_reg src_reg, gssize src_offset);
 GUM_API gboolean gum_arm_writer_put_ldr_cond_reg_reg_offset (
-    GumArmWriter * self, arm_cc cc, arm_reg dst_reg, arm_reg src_reg,
+    GumArmWriter * self, ARMCC_CondCodes cc, arm_reg dst_reg, arm_reg src_reg,
     gssize src_offset);
 GUM_API void gum_arm_writer_put_ldmia_reg_mask (GumArmWriter * self,
     arm_reg reg, guint16 mask);
@@ -118,7 +118,7 @@ GUM_API gboolean gum_arm_writer_put_str_reg_reg (GumArmWriter * self,
 GUM_API gboolean gum_arm_writer_put_str_reg_reg_offset (GumArmWriter * self,
     arm_reg src_reg, arm_reg dst_reg, gssize dst_offset);
 GUM_API gboolean gum_arm_writer_put_str_cond_reg_reg_offset (
-    GumArmWriter * self, arm_cc cc, arm_reg src_reg,
+    GumArmWriter * self, ARMCC_CondCodes cc, arm_reg src_reg,
     arm_reg dst_reg, gssize dst_offset);
 GUM_API void gum_arm_writer_put_mov_reg_reg (GumArmWriter * self,
     arm_reg dst_reg, arm_reg src_reg);

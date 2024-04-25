@@ -45,7 +45,7 @@ static gboolean gum_arm_writer_try_commit_label_refs (GumArmWriter * self);
 static void gum_arm_writer_maybe_commit_literals (GumArmWriter * self);
 static void gum_arm_writer_commit_literals (GumArmWriter * self);
 
-static guint32 gum_arm_condify (arm_cc cc);
+static guint32 gum_arm_condify (ARMCC_CondCodes cc);
 static guint32 gum_arm_shiftify (arm_shifter shifter);
 
 GumArmWriter *
@@ -467,12 +467,12 @@ gboolean
 gum_arm_writer_put_b_imm (GumArmWriter * self,
                           GumAddress target)
 {
-  return gum_arm_writer_put_b_cond_imm (self, ARM_CC_AL, target);
+  return gum_arm_writer_put_b_cond_imm (self, ARMCC_AL, target);
 }
 
 gboolean
 gum_arm_writer_put_b_cond_imm (GumArmWriter * self,
-                               arm_cc cc,
+                               ARMCC_CondCodes cc,
                                GumAddress target)
 {
   gint64 distance;
@@ -491,12 +491,12 @@ void
 gum_arm_writer_put_b_label (GumArmWriter * self,
                             gconstpointer label_id)
 {
-  gum_arm_writer_put_b_cond_label (self, ARM_CC_AL, label_id);
+  gum_arm_writer_put_b_cond_label (self, ARMCC_AL, label_id);
 }
 
 void
 gum_arm_writer_put_b_cond_label (GumArmWriter * self,
-                                 arm_cc cc,
+                                 ARMCC_CondCodes cc,
                                  gconstpointer label_id)
 {
   gum_arm_writer_add_label_reference_here (self, label_id);
@@ -740,13 +740,13 @@ gum_arm_writer_put_ldr_reg_reg_offset (GumArmWriter * self,
                                        arm_reg src_reg,
                                        gssize src_offset)
 {
-  return gum_arm_writer_put_ldr_cond_reg_reg_offset (self, ARM_CC_AL, dst_reg,
+  return gum_arm_writer_put_ldr_cond_reg_reg_offset (self, ARMCC_AL, dst_reg,
       src_reg, src_offset);
 }
 
 gboolean
 gum_arm_writer_put_ldr_cond_reg_reg_offset (GumArmWriter * self,
-                                            arm_cc cc,
+                                            ARMCC_CondCodes cc,
                                             arm_reg dst_reg,
                                             arm_reg src_reg,
                                             gssize src_offset)
@@ -809,13 +809,13 @@ gum_arm_writer_put_str_reg_reg_offset (GumArmWriter * self,
                                        arm_reg dst_reg,
                                        gssize dst_offset)
 {
-  return gum_arm_writer_put_str_cond_reg_reg_offset (self, ARM_CC_AL, src_reg,
+  return gum_arm_writer_put_str_cond_reg_reg_offset (self, ARMCC_AL, src_reg,
       dst_reg, dst_offset);
 }
 
 gboolean
 gum_arm_writer_put_str_cond_reg_reg_offset (GumArmWriter * self,
-                                            arm_cc cc,
+                                            ARMCC_CondCodes cc,
                                             arm_reg src_reg,
                                             arm_reg dst_reg,
                                             gssize dst_offset)
@@ -1245,7 +1245,7 @@ gum_arm_writer_commit_literals (GumArmWriter * self)
 }
 
 static guint32
-gum_arm_condify (arm_cc cc)
+gum_arm_condify (ARMCC_CondCodes cc)
 {
   return (cc - 1) << 28;
 }

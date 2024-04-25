@@ -63,7 +63,7 @@ GUM_API gboolean gum_arm64_relocator_eoi (GumArm64Relocator * self);
 
 GUM_API gboolean gum_arm64_relocator_can_relocate (gpointer address,
     guint min_bytes, GumRelocationScenario scenario, guint * maximum,
-    arm64_reg * available_scratch_reg);
+    aarch64_reg * available_scratch_reg);
 GUM_API guint gum_arm64_relocator_relocate (gpointer from, guint min_bytes,
     gpointer to);
 

@@ -13,6 +13,7 @@
  * See [iface@Gum.ApiResolver] for more information.
  */
 
+
 #ifndef GUM_DIET
 
 #include "gumswiftapiresolver.h"
@@ -906,21 +907,21 @@ gum_module_metadata_maybe_ingest_thunk (GumModuleMetadata * self,
   while (vtable_index == -1 && !end_of_thunk &&
       cs_disasm_iter (capstone, &code, &size, &address, insn))
   {
-    const cs_arm64_op * ops = insn->detail->arm64.operands;
+    const cs_aarch64_op * ops = insn->detail->aarch64.operands;
 
-#define GUM_REG_IS_TRACKED(reg) (reg >= ARM64_REG_X0 && reg <= ARM64_REG_X17)
-#define GUM_REG_INDEX(reg) (reg - ARM64_REG_X0)
+#define GUM_REG_IS_TRACKED(reg) (reg >= AArch64_REG_X0 && reg <= AArch64_REG_X17)
+#define GUM_REG_INDEX(reg) (reg - AArch64_REG_X0)
 
     switch (insn->id)
     {
-      case ARM64_INS_LDR:
+      case AArch64_INS_LDR:
       {
-        arm64_reg dst = ops[0].reg;
-        const arm64_op_mem * src = &ops[1].mem;
+        aarch64_reg dst = ops[0].reg;
+        const aarch64_op_mem * src = &ops[1].mem;
 
         if (GUM_REG_IS_TRACKED (dst))
         {
-          if (!(src->base == ARM64_REG_X20 && src->disp == 0))
+          if (!(src->base == AArch64_REG_X20 && src->disp == 0))
           {
             /*
              * ldr x3, [x16, #0xd0]!
@@ -933,10 +934,10 @@ gum_module_metadata_maybe_ingest_thunk (GumModuleMetadata * self,
 
         break;
       }
-      case ARM64_INS_MOV:
+      case AArch64_INS_MOV:
       {
-        arm64_reg dst = ops[0].reg;
-        const cs_arm64_op * src = &ops[1];
+        aarch64_reg dst = ops[0].reg;
+        const cs_aarch64_op * src = &ops[1];
 
         /*
          * mov x17, #0x3b0
@@ -945,28 +946,28 @@ gum_module_metadata_maybe_ingest_thunk (GumModuleMetadata * self,
          * ...
          * braa x7, x16
          */
-        if (src->type == ARM64_OP_IMM && GUM_REG_IS_TRACKED (dst))
+        if (src->type == AArch64_OP_IMM && GUM_REG_IS_TRACKED (dst))
           vtable_offsets[GUM_REG_INDEX (dst)] = src->imm;
 
         break;
       }
-      case ARM64_INS_ADD:
+      case AArch64_INS_ADD:
       {
-        arm64_reg dst = ops[0].reg;
-        arm64_reg left = ops[1].reg;
-        const cs_arm64_op * right = &ops[2];
+        aarch64_reg dst = ops[0].reg;
+        aarch64_reg left = ops[1].reg;
+        const cs_aarch64_op * right = &ops[2];
         gint offset;
 
         if (left == dst)
         {
-          if (right->type == ARM64_OP_REG &&
+          if (right->type == AArch64_OP_REG &&
               GUM_REG_IS_TRACKED (right->reg) &&
               (offset = vtable_offsets[GUM_REG_INDEX (right->reg)]) != -1)
           {
             vtable_index = offset / sizeof (gpointer);
           }
 
-          if (right->type == ARM64_OP_IMM)
+          if (right->type == AArch64_OP_IMM)
           {
             vtable_index = right->imm / sizeof (gpointer);
           }
@@ -974,27 +975,27 @@ gum_module_metadata_maybe_ingest_thunk (GumModuleMetadata * self,
 
         break;
       }
-      case ARM64_INS_BR:
-      case ARM64_INS_BRAA:
-      case ARM64_INS_BRAAZ:
-      case ARM64_INS_BRAB:
-      case ARM64_INS_BRABZ:
-      case ARM64_INS_BLR:
-      case ARM64_INS_BLRAA:
-      case ARM64_INS_BLRAAZ:
-      case ARM64_INS_BLRAB:
-      case ARM64_INS_BLRABZ:
+      case AArch64_INS_BR:
+      case AArch64_INS_BRAA:
+      case AArch64_INS_BRAAZ:
+      case AArch64_INS_BRAB:
+      case AArch64_INS_BRABZ:
+      case AArch64_INS_BLR:
+      case AArch64_INS_BLRAA:
+      case AArch64_INS_BLRAAZ:
+      case AArch64_INS_BLRAB:
+      case AArch64_INS_BLRABZ:
       {
-        arm64_reg target = ops[0].reg;
+        aarch64_reg target = ops[0].reg;
         gint offset;
 
         switch (insn->id)
         {
-          case ARM64_INS_BR:
-          case ARM64_INS_BRAA:
-          case ARM64_INS_BRAAZ:
-          case ARM64_INS_BRAB:
-          case ARM64_INS_BRABZ:
+          case AArch64_INS_BR:
+          case AArch64_INS_BRAA:
+          case AArch64_INS_BRAAZ:
+          case AArch64_INS_BRAB:
+          case AArch64_INS_BRABZ:
             end_of_thunk = TRUE;
             break;
           default:
@@ -1009,9 +1010,9 @@ gum_module_metadata_maybe_ingest_thunk (GumModuleMetadata * self,
 
         break;
       }
-      case ARM64_INS_RET:
-      case ARM64_INS_RETAA:
-      case ARM64_INS_RETAB:
+      case AArch64_INS_RET:
+      case AArch64_INS_RETAA:
+      case AArch64_INS_RETAB:
         end_of_thunk = TRUE;
         break;
     }

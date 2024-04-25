@@ -68,7 +68,7 @@ put_debug_print_pointer (GumArm64Writer * cw,
 
 static void
 put_debug_print_reg (GumArm64Writer * cw,
-                     arm64_reg reg)
+                     aarch64_reg reg)
 {
   gum_arm64_writer_put_push_all_x_registers (cw);
   gum_arm64_writer_put_call_address_with_arguments (cw,
@@ -145,8 +145,8 @@ test_arm64_stalker_fixture_follow_and_invoke (TestArm64StalkerFixture * fixture,
 
   gum_arm64_writer_init (&cw, code);
 
-  gum_arm64_writer_put_push_reg_reg (&cw, ARM64_REG_X29, ARM64_REG_X30);
-  gum_arm64_writer_put_mov_reg_reg (&cw, ARM64_REG_X29, ARM64_REG_SP);
+  gum_arm64_writer_put_push_reg_reg (&cw, AArch64_REG_X29, AArch64_REG_X30);
+  gum_arm64_writer_put_mov_reg_reg (&cw, AArch64_REG_X29, AArch64_REG_SP);
 
   gum_arm64_writer_put_call_address_with_arguments (&cw,
       GUM_ADDRESS (gum_stalker_follow_me), 3,
@@ -155,18 +155,18 @@ test_arm64_stalker_fixture_follow_and_invoke (TestArm64StalkerFixture * fixture,
       GUM_ARG_ADDRESS, GUM_ADDRESS (fixture->sink));
 
   /* call function -int func(int x)- and save address before and after call */
-  gum_arm64_writer_put_ldr_reg_address (&cw, ARM64_REG_X0, GUM_ADDRESS (arg));
+  gum_arm64_writer_put_ldr_reg_address (&cw, AArch64_REG_X0, GUM_ADDRESS (arg));
   fixture->last_invoke_calladdr = gum_arm64_writer_cur (&cw);
   gum_arm64_writer_put_call_address_with_arguments (&cw, GUM_ADDRESS (func), 0);
   fixture->last_invoke_retaddr = gum_arm64_writer_cur (&cw);
-  gum_arm64_writer_put_ldr_reg_address (&cw, ARM64_REG_X1, GUM_ADDRESS (&ret));
-  gum_arm64_writer_put_str_reg_reg_offset (&cw, ARM64_REG_W0, ARM64_REG_X1, 0);
+  gum_arm64_writer_put_ldr_reg_address (&cw, AArch64_REG_X1, GUM_ADDRESS (&ret));
+  gum_arm64_writer_put_str_reg_reg_offset (&cw, AArch64_REG_W0, AArch64_REG_X1, 0);
 
   gum_arm64_writer_put_call_address_with_arguments (&cw,
       GUM_ADDRESS (gum_stalker_unfollow_me), 1,
       GUM_ARG_ADDRESS, GUM_ADDRESS (fixture->stalker));
 
-  gum_arm64_writer_put_pop_reg_reg (&cw, ARM64_REG_X29, ARM64_REG_X30);
+  gum_arm64_writer_put_pop_reg_reg (&cw, AArch64_REG_X29, AArch64_REG_X30);
   gum_arm64_writer_put_ret (&cw);
 
   gum_arm64_writer_flush (&cw);

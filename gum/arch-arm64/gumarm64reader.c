@@ -17,10 +17,10 @@ gum_arm64_reader_try_get_relative_jump_target (gconstpointer address)
   const uint8_t * code;
   size_t size;
   uint64_t pc;
-  const cs_arm64_op * ops;
+  const cs_aarch64_op * ops;
 
-  cs_arch_register_arm64 ();
-  cs_open (CS_ARCH_ARM64, GUM_DEFAULT_CS_ENDIAN, &capstone);
+  cs_arch_register_aarch64 ();
+  cs_open (CS_ARCH_AARCH64, GUM_DEFAULT_CS_ENDIAN, &capstone);
   cs_option (capstone, CS_OPT_DETAIL, CS_OPT_ON);
 
   insn = cs_malloc (capstone);
@@ -32,20 +32,20 @@ gum_arm64_reader_try_get_relative_jump_target (gconstpointer address)
 #define GUM_DISASM_NEXT() \
     if (!cs_disasm_iter (capstone, &code, &size, &pc, insn)) \
       goto beach; \
-    ops = insn->detail->arm64.operands
+    ops = insn->detail->aarch64.operands
 #define GUM_CHECK_ID(i) \
-    if (insn->id != G_PASTE (ARM64_INS_, i)) \
+    if (insn->id != G_PASTE (AArch64_INS_, i)) \
       goto beach
 #define GUM_CHECK_OP_TYPE(n, t) \
-    if (ops[n].type != G_PASTE (ARM64_OP_, t)) \
+    if (ops[n].type != G_PASTE (AArch64_OP_, t)) \
       goto beach
 #define GUM_CHECK_OP_REG(n, r) \
-    if (ops[n].reg != G_PASTE (ARM64_REG_, r)) \
+    if (ops[n].reg != G_PASTE (AArch64_REG_, r)) \
       goto beach
 #define GUM_CHECK_OP_MEM(n, b, i, d) \
-    if (ops[n].mem.base != G_PASTE (ARM64_REG_, b)) \
+    if (ops[n].mem.base != G_PASTE (AArch64_REG_, b)) \
       goto beach; \
-    if (ops[n].mem.index != G_PASTE (ARM64_REG_, i)) \
+    if (ops[n].mem.index != G_PASTE (AArch64_REG_, i)) \
       goto beach; \
     if (ops[n].mem.disp != d) \
       goto beach
@@ -54,11 +54,11 @@ gum_arm64_reader_try_get_relative_jump_target (gconstpointer address)
 
   switch (insn->id)
   {
-    case ARM64_INS_B:
+    case AArch64_INS_B:
       result = GSIZE_TO_POINTER (ops[0].imm);
       break;
 #ifdef HAVE_DARWIN
-    case ARM64_INS_ADRP:
+    case AArch64_INS_ADRP:
     {
       GumAddress target;
 
@@ -106,8 +106,8 @@ gum_arm64_reader_disassemble_instruction_at (gconstpointer address)
   csh capstone;
   cs_insn * insn = NULL;
 
-  cs_arch_register_arm64 ();
-  cs_open (CS_ARCH_ARM64, GUM_DEFAULT_CS_ENDIAN, &capstone);
+  cs_arch_register_aarch64 ();
+  cs_open (CS_ARCH_AARCH64, GUM_DEFAULT_CS_ENDIAN, &capstone);
   cs_option (capstone, CS_OPT_DETAIL, CS_OPT_ON);
 
   cs_disasm (capstone, address, 16, GPOINTER_TO_SIZE (address), 1, &insn);

@@ -5,8 +5,8 @@
 #include <string.h>
 
 #define RED_ZONE_SIZE 128
-#define SCRATCH_REG_BOTTOM ARM64_REG_X21
-#define SCRATCH_REG_TOP ARM64_REG_X28
+#define SCRATCH_REG_BOTTOM AArch64_REG_X21
+#define SCRATCH_REG_TOP AArch64_REG_X28
 #define ABORT()                                                                \
   int *__abort_at_here__ = NULL;                                               \
   *__abort_at_here__ = 1
@@ -50,11 +50,11 @@ static void add_block_write_meta(JsonBuilder *meta, guint block_offset,
                                  guint cpu_reg_index);
 static void add_memory_address(JsonBuilder *builder, GumAddress address);
 static gchar *make_json(JsonBuilder **builder);
-static arm64_reg pick_scratch_register(cs_regs regs_read, uint8_t num_regs_read,
+static aarch64_reg pick_scratch_register(cs_regs regs_read, uint8_t num_regs_read,
                                        cs_regs regs_written,
                                        uint8_t num_regs_written);
-static arm64_reg register_to_full_size_register(arm64_reg reg);
-static void emit_scratch_register_restore(GumArm64Writer *cw, arm64_reg reg);
+static aarch64_reg register_to_full_size_register(aarch64_reg reg);
+static void emit_scratch_register_restore(GumArm64Writer *cw, aarch64_reg reg);
 static cs_err atomic_regs_access(const cs_insn *insn, cs_regs regs_read,
                                  uint8_t *regs_read_count, cs_regs regs_write,
                                  uint8_t *regs_write_count);
@@ -81,12 +81,12 @@ cs_err regs_access(csh ud, const cs_insn *insn, cs_regs regs_read,
                    uint8_t *regs_read_count, cs_regs regs_write,
                    uint8_t *regs_write_count) {
   cs_err err;
-  if (insn->id == ARM64_INS_SVC) {
+  if (insn->id == AArch64_INS_SVC) {
     // js_log("%s","encounter SVC");
-    arm64_reg reg;
+    aarch64_reg reg;
     *regs_read_count = 0;
     *regs_write_count = 0;
-    for (reg = ARM64_REG_X0; reg <= ARM64_REG_X8; reg++) {
+    for (reg = AArch64_REG_X0; reg <= AArch64_REG_X8; reg++) {
       regs_write[*regs_write_count] = reg;
       *regs_write_count = *regs_write_count + 1;
     }
@@ -100,10 +100,10 @@ cs_err regs_access(csh ud, const cs_insn *insn, cs_regs regs_read,
   }
   //读编码表读烦了，这样写了
 //   switch (insn.id) {
-//     case ARM64_INS_CAS:
-//     case ARM64_INS_CASA:
-//     case ARM64_INS_CASAL:
-//     case ARM64_INS_CASL:
+//     case AArch64_INS_CAS:
+//     case AArch64_INS_CASA:
+//     case AArch64_INS_CASAL:
+//     case AArch64_INS_CASL:
 //     regs_write[0]=insn.opreand[0]
 //     regs_write[1]=insn.opreand[2]
 //     *regs_write_count=2;
@@ -128,7 +128,7 @@ void transform(GumStalkerIterator *iterator, GumStalkerOutput *output,
   guint num_instructions = 0;
   GumAddress block_address = 0;
   guint log_buf_offset = 16;
-  arm64_reg prev_session_reg = ARM64_REG_INVALID;
+  aarch64_reg prev_session_reg = AArch64_REG_INVALID;
 
   JsonBuilder *meta = json_builder_new_immutable();
   json_builder_begin_object(meta);
@@ -174,47 +174,47 @@ void transform(GumStalkerIterator *iterator, GumStalkerOutput *output,
       regs_written[i] = register_to_full_size_register(regs_written[i]);
     }
 
-    arm64_reg session_reg =
+    aarch64_reg session_reg =
         is_last_in_block
             ? SCRATCH_REG_TOP
             : pick_scratch_register(regs_read, num_regs_read, regs_written,
                                     num_regs_written);
 
     if (session_reg != prev_session_reg) {
-      if (prev_session_reg != ARM64_REG_INVALID)
+      if (prev_session_reg != AArch64_REG_INVALID)
         gum_arm64_writer_put_mov_reg_reg(cw, session_reg, prev_session_reg);
       else
         gum_arm64_writer_put_ldr_reg_address(cw, session_reg,
                                              GUM_ADDRESS(&session));
     }
 
-    if (prev_session_reg != ARM64_REG_INVALID &&
+    if (prev_session_reg != AArch64_REG_INVALID &&
         session_reg != prev_session_reg)
       emit_scratch_register_restore(cw, prev_session_reg);
 
     if (is_first_in_block) {
 
       gum_arm64_writer_put_str_reg_reg_offset(
-          cw, ARM64_REG_LR, session_reg,
+          cw, AArch64_REG_LR, session_reg,
           G_STRUCT_OFFSET(ITraceSession, log_buf) + 8);
       // add_block_write_meta (meta, insn->address - block_address, 33);
     }
     if (is_last_in_block) {
       gum_arm64_writer_put_stp_reg_reg_reg_offset(
-          cw, ARM64_REG_X27, ARM64_REG_LR, session_reg,
+          cw, AArch64_REG_X27, AArch64_REG_LR, session_reg,
           G_STRUCT_OFFSET(ITraceSession, saved_regs), GUM_INDEX_SIGNED_OFFSET);
       // 我们知道offset 在runtime之前，但是要保存此值 mov
       // log_buf_offset，将block信息写入指令中。
-      gum_arm64_writer_put_ldr_reg_u64(cw, ARM64_REG_X27, block_address);
+      gum_arm64_writer_put_ldr_reg_u64(cw, AArch64_REG_X27, block_address);
       gum_arm64_writer_put_str_reg_reg_offset(
-          cw, ARM64_REG_X27, session_reg,
+          cw, AArch64_REG_X27, session_reg,
           G_STRUCT_OFFSET(ITraceSession, log_buf));
       // 我们知道offset 在runtime之前，但是要保存此值 mov
       // log_buf_offset，将block信息写入指令中。
-      gum_arm64_writer_put_ldr_reg_u64(cw, ARM64_REG_X27, log_buf_offset);
+      gum_arm64_writer_put_ldr_reg_u64(cw, AArch64_REG_X27, log_buf_offset);
 
       gum_arm64_writer_put_str_reg_reg_offset(
-          cw, ARM64_REG_X27, session_reg,
+          cw, AArch64_REG_X27, session_reg,
           G_STRUCT_OFFSET(ITraceSession, pending_size));
       // gum_stalker_iterator_put_callout(iterator,);
       // if (session.write_impl == 0 ||
@@ -234,7 +234,7 @@ void transform(GumStalkerIterator *iterator, GumStalkerOutput *output,
       // gum_arm64_writer_put_bl_imm (cw, session.write_impl);
       // restore regs
       gum_arm64_writer_put_ldp_reg_reg_reg_offset(
-          cw, ARM64_REG_X27, ARM64_REG_LR, session_reg,
+          cw, AArch64_REG_X27, AArch64_REG_LR, session_reg,
           G_STRUCT_OFFSET(ITraceSession, saved_regs), GUM_INDEX_SIGNED_OFFSET);
 
       emit_scratch_register_restore(cw, session_reg);
@@ -249,7 +249,7 @@ void transform(GumStalkerIterator *iterator, GumStalkerOutput *output,
     guint block_offset = (insn->address) - block_address;
 
     for (uint8_t i = 0; i != num_regs_written; i++) {
-      arm64_reg reg = regs_written[i];
+      aarch64_reg reg = regs_written[i];
       gboolean is_scratch_reg =
           reg >= SCRATCH_REG_BOTTOM && reg <= SCRATCH_REG_TOP;
       if (is_scratch_reg) {
@@ -260,42 +260,42 @@ void transform(GumStalkerIterator *iterator, GumStalkerOutput *output,
       }
     }
     for (uint8_t i = 0; i != num_regs_written; i++) {
-      arm64_reg reg = regs_written[i];
+      aarch64_reg reg = regs_written[i];
 
       guint cpu_reg_index;
-      arm64_reg source_reg;
+      aarch64_reg source_reg;
       gsize size;
-      arm64_reg temp_reg = ARM64_REG_INVALID;
+      aarch64_reg temp_reg = AArch64_REG_INVALID;
 
-      if (reg == ARM64_REG_SP) {
-        temp_reg = ARM64_REG_X0;
+      if (reg == AArch64_REG_SP) {
+        temp_reg = AArch64_REG_X0;
 
         cpu_reg_index = 1;
         source_reg = temp_reg;
         size = 8;
-      } else if (reg >= ARM64_REG_X0 && reg <= ARM64_REG_X28) {
-        cpu_reg_index = 3 + (reg - ARM64_REG_X0);
+      } else if (reg >= AArch64_REG_X0 && reg <= AArch64_REG_X28) {
+        cpu_reg_index = 3 + (reg - AArch64_REG_X0);
         source_reg = reg;
         size = 8;
-      } else if (reg == ARM64_REG_FP) {
+      } else if (reg == AArch64_REG_FP) {
         cpu_reg_index = 32;
         source_reg = reg;
         size = 8;
-      } else if (reg == ARM64_REG_LR) {
+      } else if (reg == AArch64_REG_LR) {
         cpu_reg_index = 33;
         source_reg = reg;
         size = 8;
-      } else if (reg >= ARM64_REG_Q0 && reg <= ARM64_REG_Q31) {
-        cpu_reg_index = 34 + (reg - ARM64_REG_Q0);
+      } else if (reg >= AArch64_REG_Q0 && reg <= AArch64_REG_Q31) {
+        cpu_reg_index = 34 + (reg - AArch64_REG_Q0);
         source_reg = reg;
         size = 16;
-      } else if (reg == ARM64_REG_NZCV) {
-        temp_reg = ARM64_REG_X0;
+      } else if (reg == AArch64_REG_NZCV) {
+        temp_reg = AArch64_REG_X0;
 
         cpu_reg_index = 2;
         source_reg = temp_reg;
         size = 8;
-      } else if (reg == ARM64_REG_XZR || reg == ARM64_REG_WZR) {
+      } else if (reg == AArch64_REG_XZR || reg == AArch64_REG_WZR) {
         continue;
       } else {
         js_log("Unhandled register: %s", cs_reg_name(capstone, reg));
@@ -303,14 +303,14 @@ void transform(GumStalkerIterator *iterator, GumStalkerOutput *output,
           ;
       }
 
-      if (temp_reg != ARM64_REG_INVALID)
+      if (temp_reg != AArch64_REG_INVALID)
         gum_arm64_writer_put_str_reg_reg_offset(
             cw, temp_reg, session_reg,
             G_STRUCT_OFFSET(ITraceSession, saved_regs));
 
-      if (reg == ARM64_REG_SP)
-        gum_arm64_writer_put_mov_reg_reg(cw, temp_reg, ARM64_REG_SP);
-      else if (reg == ARM64_REG_NZCV)
+      if (reg == AArch64_REG_SP)
+        gum_arm64_writer_put_mov_reg_reg(cw, temp_reg, AArch64_REG_SP);
+      else if (reg == AArch64_REG_NZCV)
         gum_arm64_writer_put_mov_reg_nzcv(cw, temp_reg);
 
       gsize offset = G_STRUCT_OFFSET(ITraceSession, log_buf) + log_buf_offset;
@@ -337,14 +337,14 @@ void transform(GumStalkerIterator *iterator, GumStalkerOutput *output,
       add_block_write_meta(meta, block_offset, cpu_reg_index);
       log_buf_offset += paddings + size;
 
-      if (temp_reg != ARM64_REG_INVALID)
+      if (temp_reg != AArch64_REG_INVALID)
         gum_arm64_writer_put_ldr_reg_reg_offset(
             cw, temp_reg, session_reg,
             G_STRUCT_OFFSET(ITraceSession, saved_regs));
     }
 
     prev_session_reg = session_reg;
-    // if (insn->id == ARM64_INS_LDADDAL) {
+    // if (insn->id == AArch64_INS_LDADDAL) {
     //     ABORT();
     // }
   }
@@ -402,28 +402,28 @@ void transform(GumStalkerIterator *iterator, GumStalkerOutput *output,
  
 
   if (!is_last_in_block) {
-    arm64_reg session_reg=SCRATCH_REG_TOP;
+    aarch64_reg session_reg=SCRATCH_REG_TOP;
     //reg_header
     gum_arm64_writer_put_ldr_reg_address(cw, session_reg,
                                              GUM_ADDRESS(&session));
     gum_arm64_writer_put_stp_reg_reg_reg_offset(
-    cw, ARM64_REG_X27, ARM64_REG_LR, session_reg,
+    cw, AArch64_REG_X27, AArch64_REG_LR, session_reg,
     G_STRUCT_OFFSET(ITraceSession, saved_regs), GUM_INDEX_SIGNED_OFFSET);
       // 我们知道offset 在runtime之前，但是要保存此值 mov
       // log_buf_offset，将block信息写入指令中。
-      gum_arm64_writer_put_ldr_reg_u64(cw, ARM64_REG_X27, block_address);
+      gum_arm64_writer_put_ldr_reg_u64(cw, AArch64_REG_X27, block_address);
       gum_arm64_writer_put_str_reg_reg_offset(
-          cw, ARM64_REG_X27, session_reg,
+          cw, AArch64_REG_X27, session_reg,
           G_STRUCT_OFFSET(ITraceSession, log_buf));
       // 我们知道offset 在runtime之前，但是要保存此值 mov
       // log_buf_offset，将block信息写入指令中。
-      gum_arm64_writer_put_ldr_reg_u64(cw, ARM64_REG_X27, log_buf_offset);
+      gum_arm64_writer_put_ldr_reg_u64(cw, AArch64_REG_X27, log_buf_offset);
 
       gum_arm64_writer_put_str_reg_reg_offset(
-          cw, ARM64_REG_X27, session_reg,
+          cw, AArch64_REG_X27, session_reg,
           G_STRUCT_OFFSET(ITraceSession, pending_size));
       gum_arm64_writer_put_ldp_reg_reg_reg_offset(
-          cw, ARM64_REG_X27, ARM64_REG_LR, session_reg,
+          cw, AArch64_REG_X27, AArch64_REG_LR, session_reg,
           G_STRUCT_OFFSET(ITraceSession, saved_regs), GUM_INDEX_SIGNED_OFFSET);
       emit_scratch_register_restore(cw, session_reg);
     
@@ -442,7 +442,7 @@ static void on_first_block_hit(GumCpuContext *cpu_context, gpointer user_data) {
   session.state = ITRACE_STATE_STARTED;
 
   memcpy(session.scratch_regs,
-         cpu_context->x + (SCRATCH_REG_BOTTOM - ARM64_REG_X0),
+         cpu_context->x + (SCRATCH_REG_BOTTOM - AArch64_REG_X0),
          sizeof(session.scratch_regs));
 
   JsonBuilder *meta = json_builder_new_immutable();
@@ -532,10 +532,10 @@ static gchar *make_json(JsonBuilder **builder) {
   return json;
 }
 
-static arm64_reg pick_scratch_register(cs_regs regs_read, uint8_t num_regs_read,
+static aarch64_reg pick_scratch_register(cs_regs regs_read, uint8_t num_regs_read,
                                        cs_regs regs_written,
                                        uint8_t num_regs_written) {
-  arm64_reg candidate;
+  aarch64_reg candidate;
 
   for (candidate = SCRATCH_REG_TOP; candidate != SCRATCH_REG_BOTTOM - 1;
        candidate--) {
@@ -565,44 +565,44 @@ static arm64_reg pick_scratch_register(cs_regs regs_read, uint8_t num_regs_read,
   return candidate;
 }
 
-static arm64_reg register_to_full_size_register(arm64_reg reg) {
+static aarch64_reg register_to_full_size_register(aarch64_reg reg) {
 
   switch (reg) {
-  case ARM64_REG_SP:
-  case ARM64_REG_FP:
-  case ARM64_REG_LR:
-  case ARM64_REG_NZCV:
-  case ARM64_REG_XZR:
-  case ARM64_REG_WZR:
+  case AArch64_REG_SP:
+  case AArch64_REG_FP:
+  case AArch64_REG_LR:
+  case AArch64_REG_NZCV:
+  case AArch64_REG_XZR:
+  case AArch64_REG_WZR:
     return reg;
   }
 
-  if (reg >= ARM64_REG_X0 && reg <= ARM64_REG_X28)
+  if (reg >= AArch64_REG_X0 && reg <= AArch64_REG_X28)
     return reg;
-  if (reg >= ARM64_REG_W0 && reg <= ARM64_REG_W28)
-    return ARM64_REG_X0 + (reg - ARM64_REG_W0);
-  if (reg == ARM64_REG_W29)
-    return ARM64_REG_FP;
-  if (reg == ARM64_REG_W30)
-    return ARM64_REG_LR;
+  if (reg >= AArch64_REG_W0 && reg <= AArch64_REG_W28)
+    return AArch64_REG_X0 + (reg - AArch64_REG_W0);
+  if (reg == AArch64_REG_W29)
+    return AArch64_REG_FP;
+  if (reg == AArch64_REG_W30)
+    return AArch64_REG_LR;
 
-  if (reg >= ARM64_REG_Q0 && reg <= ARM64_REG_Q31)
+  if (reg >= AArch64_REG_Q0 && reg <= AArch64_REG_Q31)
     return reg;
-  if (reg >= ARM64_REG_V0 && reg <= ARM64_REG_V31)
-    return ARM64_REG_Q0 + (reg - ARM64_REG_V0);
-  if (reg >= ARM64_REG_D0 && reg <= ARM64_REG_D31)
-    return ARM64_REG_Q0 + (reg - ARM64_REG_D0);
-  if (reg >= ARM64_REG_S0 && reg <= ARM64_REG_S31)
-    return ARM64_REG_Q0 + (reg - ARM64_REG_S0);
-  if (reg >= ARM64_REG_H0 && reg <= ARM64_REG_H31)
-    return ARM64_REG_Q0 + (reg - ARM64_REG_H0);
-  if (reg >= ARM64_REG_B0 && reg <= ARM64_REG_B31)
-    return ARM64_REG_Q0 + (reg - ARM64_REG_B0);
+//   if (reg >= AArch64_REG_V0 && reg <= AArch64_REG_V31)
+//     return AArch64_REG_Q0 + (reg - AArch64_REG_V0);
+  if (reg >= AArch64_REG_D0 && reg <= AArch64_REG_D31)
+    return AArch64_REG_Q0 + (reg - AArch64_REG_D0);
+  if (reg >= AArch64_REG_S0 && reg <= AArch64_REG_S31)
+    return AArch64_REG_Q0 + (reg - AArch64_REG_S0);
+  if (reg >= AArch64_REG_H0 && reg <= AArch64_REG_H31)
+    return AArch64_REG_Q0 + (reg - AArch64_REG_H0);
+  if (reg >= AArch64_REG_B0 && reg <= AArch64_REG_B31)
+    return AArch64_REG_Q0 + (reg - AArch64_REG_B0);
 
   return reg;
 }
 
-static void emit_scratch_register_restore(GumArm64Writer *cw, arm64_reg reg) {
+static void emit_scratch_register_restore(GumArm64Writer *cw, aarch64_reg reg) {
   gum_arm64_writer_put_ldr_reg_reg_offset(
       cw, reg, reg,
       G_STRUCT_OFFSET(ITraceSession, scratch_regs) + SCRATCH_REG_OFFSET(reg));
@@ -636,8 +636,8 @@ static inline uint32_t extract32(uint32_t value, int start, int length) {
 }
 
 static inline int operand_to_cs_reg_id(guint operand, gboolean v) {
-  guint32 ret = ARM64_REG_INVALID;
-  guint32 reg_base = v ? ARM64_REG_Q0 : ARM64_REG_X0;
+  guint32 ret = AArch64_REG_INVALID;
+  guint32 reg_base = v ? AArch64_REG_Q0 : AArch64_REG_X0;
   ret = reg_base + operand;
   return ret;
 }

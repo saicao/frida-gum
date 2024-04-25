@@ -684,16 +684,16 @@ gum_insert_deflector (gpointer cave,
 
   if (ctx->dedicated_target != NULL)
   {
-    gum_arm64_writer_put_push_reg_reg (&aw, ARM64_REG_X0, ARM64_REG_LR);
-    gum_arm64_writer_put_ldr_reg_address (&aw, ARM64_REG_X0,
+    gum_arm64_writer_put_push_reg_reg (&aw, AArch64_REG_X0, AArch64_REG_LR);
+    gum_arm64_writer_put_ldr_reg_address (&aw, AArch64_REG_X0,
         GUM_ADDRESS (ctx->dedicated_target));
-    gum_arm64_writer_put_br_reg (&aw, ARM64_REG_X0);
+    gum_arm64_writer_put_br_reg (&aw, AArch64_REG_X0);
   }
   else
   {
-    gum_arm64_writer_put_ldr_reg_address (&aw, ARM64_REG_X0,
+    gum_arm64_writer_put_ldr_reg_address (&aw, AArch64_REG_X0,
         GUM_ADDRESS (dispatcher->thunk));
-    gum_arm64_writer_put_br_reg (&aw, ARM64_REG_X0);
+    gum_arm64_writer_put_br_reg (&aw, AArch64_REG_X0);
   }
 
   gum_arm64_writer_flush (&aw);
@@ -739,30 +739,30 @@ gum_write_thunk (gpointer thunk,
   gum_arm64_writer_put_instruction (&aw, 0xadbf0fe2);
   gum_arm64_writer_put_instruction (&aw, 0xadbf07e0);
 
-  gum_arm64_writer_put_push_reg_reg (&aw, ARM64_REG_X17, ARM64_REG_X18);
-  gum_arm64_writer_put_push_reg_reg (&aw, ARM64_REG_X15, ARM64_REG_X16);
-  gum_arm64_writer_put_push_reg_reg (&aw, ARM64_REG_X13, ARM64_REG_X14);
-  gum_arm64_writer_put_push_reg_reg (&aw, ARM64_REG_X11, ARM64_REG_X12);
-  gum_arm64_writer_put_push_reg_reg (&aw, ARM64_REG_X9, ARM64_REG_X10);
-  gum_arm64_writer_put_push_reg_reg (&aw, ARM64_REG_X7, ARM64_REG_X8);
-  gum_arm64_writer_put_push_reg_reg (&aw, ARM64_REG_X5, ARM64_REG_X6);
-  gum_arm64_writer_put_push_reg_reg (&aw, ARM64_REG_X3, ARM64_REG_X4);
-  gum_arm64_writer_put_push_reg_reg (&aw, ARM64_REG_X1, ARM64_REG_X2);
+  gum_arm64_writer_put_push_reg_reg (&aw, AArch64_REG_X17, AArch64_REG_X18);
+  gum_arm64_writer_put_push_reg_reg (&aw, AArch64_REG_X15, AArch64_REG_X16);
+  gum_arm64_writer_put_push_reg_reg (&aw, AArch64_REG_X13, AArch64_REG_X14);
+  gum_arm64_writer_put_push_reg_reg (&aw, AArch64_REG_X11, AArch64_REG_X12);
+  gum_arm64_writer_put_push_reg_reg (&aw, AArch64_REG_X9, AArch64_REG_X10);
+  gum_arm64_writer_put_push_reg_reg (&aw, AArch64_REG_X7, AArch64_REG_X8);
+  gum_arm64_writer_put_push_reg_reg (&aw, AArch64_REG_X5, AArch64_REG_X6);
+  gum_arm64_writer_put_push_reg_reg (&aw, AArch64_REG_X3, AArch64_REG_X4);
+  gum_arm64_writer_put_push_reg_reg (&aw, AArch64_REG_X1, AArch64_REG_X2);
 
   gum_arm64_writer_put_call_address_with_arguments (&aw,
       GUM_ADDRESS (gum_code_deflector_dispatcher_lookup), 2,
       GUM_ARG_ADDRESS, GUM_ADDRESS (dispatcher),
-      GUM_ARG_REGISTER, ARM64_REG_LR);
+      GUM_ARG_REGISTER, AArch64_REG_LR);
 
-  gum_arm64_writer_put_pop_reg_reg (&aw, ARM64_REG_X1, ARM64_REG_X2);
-  gum_arm64_writer_put_pop_reg_reg (&aw, ARM64_REG_X3, ARM64_REG_X4);
-  gum_arm64_writer_put_pop_reg_reg (&aw, ARM64_REG_X5, ARM64_REG_X6);
-  gum_arm64_writer_put_pop_reg_reg (&aw, ARM64_REG_X7, ARM64_REG_X8);
-  gum_arm64_writer_put_pop_reg_reg (&aw, ARM64_REG_X9, ARM64_REG_X10);
-  gum_arm64_writer_put_pop_reg_reg (&aw, ARM64_REG_X11, ARM64_REG_X12);
-  gum_arm64_writer_put_pop_reg_reg (&aw, ARM64_REG_X13, ARM64_REG_X14);
-  gum_arm64_writer_put_pop_reg_reg (&aw, ARM64_REG_X15, ARM64_REG_X16);
-  gum_arm64_writer_put_pop_reg_reg (&aw, ARM64_REG_X17, ARM64_REG_X18);
+  gum_arm64_writer_put_pop_reg_reg (&aw, AArch64_REG_X1, AArch64_REG_X2);
+  gum_arm64_writer_put_pop_reg_reg (&aw, AArch64_REG_X3, AArch64_REG_X4);
+  gum_arm64_writer_put_pop_reg_reg (&aw, AArch64_REG_X5, AArch64_REG_X6);
+  gum_arm64_writer_put_pop_reg_reg (&aw, AArch64_REG_X7, AArch64_REG_X8);
+  gum_arm64_writer_put_pop_reg_reg (&aw, AArch64_REG_X9, AArch64_REG_X10);
+  gum_arm64_writer_put_pop_reg_reg (&aw, AArch64_REG_X11, AArch64_REG_X12);
+  gum_arm64_writer_put_pop_reg_reg (&aw, AArch64_REG_X13, AArch64_REG_X14);
+  gum_arm64_writer_put_pop_reg_reg (&aw, AArch64_REG_X15, AArch64_REG_X16);
+  gum_arm64_writer_put_pop_reg_reg (&aw, AArch64_REG_X17, AArch64_REG_X18);
 
   /* pop {q0-q7} */
   gum_arm64_writer_put_instruction (&aw, 0xacc107e0);
@@ -770,7 +770,7 @@ gum_write_thunk (gpointer thunk,
   gum_arm64_writer_put_instruction (&aw, 0xacc117e4);
   gum_arm64_writer_put_instruction (&aw, 0xacc11fe6);
 
-  gum_arm64_writer_put_br_reg (&aw, ARM64_REG_X0);
+  gum_arm64_writer_put_br_reg (&aw, AArch64_REG_X0);
   gum_arm64_writer_clear (&aw);
 # else
   (void) gum_code_deflector_dispatcher_lookup;

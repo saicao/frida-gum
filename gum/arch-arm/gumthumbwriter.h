@@ -94,9 +94,9 @@ GUM_API void gum_thumb_writer_put_beq_label (GumThumbWriter * self,
 GUM_API void gum_thumb_writer_put_bne_label (GumThumbWriter * self,
     gconstpointer label_id);
 GUM_API void gum_thumb_writer_put_b_cond_label (GumThumbWriter * self,
-    arm_cc cc, gconstpointer label_id);
+    ARMCC_CondCodes cc, gconstpointer label_id);
 GUM_API void gum_thumb_writer_put_b_cond_label_wide (GumThumbWriter * self,
-    arm_cc cc, gconstpointer label_id);
+    ARMCC_CondCodes cc, gconstpointer label_id);
 GUM_API void gum_thumb_writer_put_cbz_reg_label (GumThumbWriter * self,
     arm_reg reg, gconstpointer label_id);
 GUM_API void gum_thumb_writer_put_cbnz_reg_label (GumThumbWriter * self,

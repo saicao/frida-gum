@@ -623,19 +623,19 @@ void
 gum_thumb_writer_put_beq_label (GumThumbWriter * self,
                                 gconstpointer label_id)
 {
-  gum_thumb_writer_put_b_cond_label (self, ARM_CC_EQ, label_id);
+  gum_thumb_writer_put_b_cond_label (self, ARMCC_EQ, label_id);
 }
 
 void
 gum_thumb_writer_put_bne_label (GumThumbWriter * self,
                                 gconstpointer label_id)
 {
-  gum_thumb_writer_put_b_cond_label (self, ARM_CC_NE, label_id);
+  gum_thumb_writer_put_b_cond_label (self, ARMCC_NE, label_id);
 }
 
 void
 gum_thumb_writer_put_b_cond_label (GumThumbWriter * self,
-                                   arm_cc cc,
+                                   ARMCC_CondCodes cc,
                                    gconstpointer label_id)
 {
   gum_thumb_writer_add_label_reference_here (self, label_id, GUM_THUMB_B_T1);
@@ -644,7 +644,7 @@ gum_thumb_writer_put_b_cond_label (GumThumbWriter * self,
 
 void
 gum_thumb_writer_put_b_cond_label_wide (GumThumbWriter * self,
-                                        arm_cc cc,
+                                        ARMCC_CondCodes cc,
                                         gconstpointer label_id)
 {
   gum_thumb_writer_add_label_reference_here (self, label_id, GUM_THUMB_B_T3);
@@ -1480,7 +1480,7 @@ gum_thumb_writer_put_mrs_reg_reg (GumThumbWriter * self,
 
   if (dst.meta > GUM_ARM_MREG_R12)
     return FALSE;
-  if (src_reg != ARM_SYSREG_APSR_NZCVQ)
+  if (src_reg != ARM_MCLASSSYSREG_APSR_NZCVQ)
     return FALSE;
 
   gum_thumb_writer_put_instruction_wide (self,
@@ -1499,7 +1499,7 @@ gum_thumb_writer_put_msr_reg_reg (GumThumbWriter * self,
 
   gum_arm_reg_describe (src_reg, &src);
 
-  if (dst_reg != ARM_SYSREG_APSR_NZCVQ)
+  if (dst_reg != ARM_MCLASSSYSREG_APSR_NZCVQ)
     return FALSE;
   if (src.meta > GUM_ARM_MREG_R12)
     return FALSE;

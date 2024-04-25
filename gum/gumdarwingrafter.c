@@ -1325,12 +1325,12 @@ gum_darwin_grafter_emit_segments (gpointer output,
 
       gum_arm64_writer_reset (&cw, trampoline->on_enter);
       cw.pc = on_enter_addr;
-      gum_arm64_writer_put_push_reg_reg (&cw, ARM64_REG_X16, ARM64_REG_X17);
-      gum_arm64_writer_put_ldr_reg_u32_ptr (&cw, ARM64_REG_W16, flags_addr);
+      gum_arm64_writer_put_push_reg_reg (&cw, AArch64_REG_X16, AArch64_REG_X17);
+      gum_arm64_writer_put_ldr_reg_u32_ptr (&cw, AArch64_REG_W16, flags_addr);
       gum_arm64_writer_put_tbz_reg_imm_label (&cw,
-          ARM64_REG_W16, 0, not_active);
+          AArch64_REG_W16, 0, not_active);
       if (!gum_arm64_writer_put_ldr_reg_u64_ptr (&cw,
-          ARM64_REG_X17, user_data_addr))
+          AArch64_REG_X17, user_data_addr))
       {
         goto ldr_error;
       }
@@ -1338,9 +1338,9 @@ gum_darwin_grafter_emit_segments (gpointer output,
 
       g_assert (cw.pc == trampoline_addr +
           G_STRUCT_OFFSET (GumGraftedHookTrampoline, on_leave));
-      gum_arm64_writer_put_push_reg_reg (&cw, ARM64_REG_X16, ARM64_REG_X17);
+      gum_arm64_writer_put_push_reg_reg (&cw, AArch64_REG_X16, AArch64_REG_X17);
       if (!gum_arm64_writer_put_ldr_reg_u64_ptr (&cw,
-          ARM64_REG_X17, user_data_addr))
+          AArch64_REG_X17, user_data_addr))
       {
         goto ldr_error;
       }
@@ -1349,7 +1349,7 @@ gum_darwin_grafter_emit_segments (gpointer output,
       g_assert (cw.pc == trampoline_addr +
           G_STRUCT_OFFSET (GumGraftedHookTrampoline, not_active));
       gum_arm64_writer_put_label (&cw, not_active);
-      gum_arm64_writer_put_pop_reg_reg (&cw, ARM64_REG_X16, ARM64_REG_X17);
+      gum_arm64_writer_put_pop_reg_reg (&cw, AArch64_REG_X16, AArch64_REG_X17);
 
       g_assert (cw.pc == trampoline_addr +
           G_STRUCT_OFFSET (GumGraftedHookTrampoline, on_invoke));
@@ -1392,9 +1392,9 @@ gum_darwin_grafter_emit_segments (gpointer output,
       gum_arm64_writer_reset (&cw, trampoline->on_enter);
       cw.pc = trampoline_addr +
           G_STRUCT_OFFSET (GumGraftedImportTrampoline, on_enter);
-      gum_arm64_writer_put_push_reg_reg (&cw, ARM64_REG_X16, ARM64_REG_X17);
+      gum_arm64_writer_put_push_reg_reg (&cw, AArch64_REG_X16, AArch64_REG_X17);
       if (!gum_arm64_writer_put_ldr_reg_u64_ptr (&cw,
-          ARM64_REG_X17, user_data_addr))
+          AArch64_REG_X17, user_data_addr))
       {
         goto ldr_error;
       }
@@ -1402,9 +1402,9 @@ gum_darwin_grafter_emit_segments (gpointer output,
 
       g_assert (cw.pc == trampoline_addr +
           G_STRUCT_OFFSET (GumGraftedImportTrampoline, on_leave));
-      gum_arm64_writer_put_push_reg_reg (&cw, ARM64_REG_X16, ARM64_REG_X17);
+      gum_arm64_writer_put_push_reg_reg (&cw, AArch64_REG_X16, AArch64_REG_X17);
       if (!gum_arm64_writer_put_ldr_reg_u64_ptr (&cw,
-          ARM64_REG_X17, user_data_addr))
+          AArch64_REG_X17, user_data_addr))
       {
         goto ldr_error;
       }
@@ -1427,19 +1427,19 @@ gum_darwin_grafter_emit_segments (gpointer output,
 
     cw.pc = do_begin_invocation_addr;
     if (!gum_arm64_writer_put_ldr_reg_u64_ptr (&cw,
-        ARM64_REG_X16, begin_invocation_addr))
+        AArch64_REG_X16, begin_invocation_addr))
     {
       goto ldr_error;
     }
-    gum_arm64_writer_put_br_reg (&cw, ARM64_REG_X16);
+    gum_arm64_writer_put_br_reg (&cw, AArch64_REG_X16);
 
     g_assert (cw.pc == do_end_invocation_addr);
     if (!gum_arm64_writer_put_ldr_reg_u64_ptr (&cw,
-        ARM64_REG_X16, end_invocation_addr))
+        AArch64_REG_X16, end_invocation_addr))
     {
       goto ldr_error;
     }
-    gum_arm64_writer_put_br_reg (&cw, ARM64_REG_X16);
+    gum_arm64_writer_put_br_reg (&cw, AArch64_REG_X16);
   }
 
   success = TRUE;

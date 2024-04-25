@@ -194,7 +194,7 @@ main (gint argc, gchar * argv[])
   if (cs_support (CS_ARCH_ARM))
     TESTLIST_REGISTER (thumbrelocator);
   TESTLIST_REGISTER (arm64writer);
-  if (cs_support (CS_ARCH_ARM64))
+  if (cs_support (CS_ARCH_AARCH64))
     TESTLIST_REGISTER (arm64relocator);
   TESTLIST_REGISTER (interceptor);
 #ifdef HAVE_DARWIN

@@ -740,42 +740,42 @@ gum_emit_test_clobber_regs_function (gpointer mem,
 
   for (i = 31; i != -1; i--)
   {
-    gum_arm64_writer_put_ldr_reg_reg_offset (&cw, ARM64_REG_Q0 + i,
-        ARM64_REG_X0,
+    gum_arm64_writer_put_ldr_reg_reg_offset (&cw, AArch64_REG_Q0 + i,
+        AArch64_REG_X0,
         G_STRUCT_OFFSET (GumCpuContext, v) + (i * sizeof (GumArm64VectorReg)));
   }
 
-  gum_arm64_writer_put_ldr_reg_reg_offset (&cw, ARM64_REG_FP,
-      ARM64_REG_X0, G_STRUCT_OFFSET (GumCpuContext, fp));
+  gum_arm64_writer_put_ldr_reg_reg_offset (&cw, AArch64_REG_FP,
+      AArch64_REG_X0, G_STRUCT_OFFSET (GumCpuContext, fp));
   for (i = 28; i != -1; i--)
   {
-    gum_arm64_writer_put_ldr_reg_reg_offset (&cw, ARM64_REG_X0 + i,
-        ARM64_REG_X0, G_STRUCT_OFFSET (GumCpuContext, x) + (i * 8));
+    gum_arm64_writer_put_ldr_reg_reg_offset (&cw, AArch64_REG_X0 + i,
+        AArch64_REG_X0, G_STRUCT_OFFSET (GumCpuContext, x) + (i * 8));
   }
 
   gum_arm64_writer_put_bl_imm (&cw,
       gum_strip_code_address (GUM_ADDRESS (ctx->target_func)));
 
-  gum_arm64_writer_put_push_reg_reg (&cw, ARM64_REG_X0, ARM64_REG_X1);
+  gum_arm64_writer_put_push_reg_reg (&cw, AArch64_REG_X0, AArch64_REG_X1);
   sp_distance_to_saved_x1 += 16;
-  gum_arm64_writer_put_ldr_reg_reg_offset (&cw, ARM64_REG_X0,
-      ARM64_REG_SP, sp_distance_to_saved_x1);
+  gum_arm64_writer_put_ldr_reg_reg_offset (&cw, AArch64_REG_X0,
+      AArch64_REG_SP, sp_distance_to_saved_x1);
 
-  gum_arm64_writer_put_str_reg_reg_offset (&cw, ARM64_REG_FP,
-      ARM64_REG_X0, G_STRUCT_OFFSET (GumCpuContext, fp));
+  gum_arm64_writer_put_str_reg_reg_offset (&cw, AArch64_REG_FP,
+      AArch64_REG_X0, G_STRUCT_OFFSET (GumCpuContext, fp));
   for (i = 28; i != 0; i--)
   {
-    gum_arm64_writer_put_str_reg_reg_offset (&cw, ARM64_REG_X0 + i,
-        ARM64_REG_X0, G_STRUCT_OFFSET (GumCpuContext, x) + (i * 8));
+    gum_arm64_writer_put_str_reg_reg_offset (&cw, AArch64_REG_X0 + i,
+        AArch64_REG_X0, G_STRUCT_OFFSET (GumCpuContext, x) + (i * 8));
   }
-  gum_arm64_writer_put_pop_reg_reg (&cw, ARM64_REG_X1, ARM64_REG_X2);
-  gum_arm64_writer_put_str_reg_reg_offset (&cw, ARM64_REG_X1,
-      ARM64_REG_X0, G_STRUCT_OFFSET (GumCpuContext, x[0]));
+  gum_arm64_writer_put_pop_reg_reg (&cw, AArch64_REG_X1, AArch64_REG_X2);
+  gum_arm64_writer_put_str_reg_reg_offset (&cw, AArch64_REG_X1,
+      AArch64_REG_X0, G_STRUCT_OFFSET (GumCpuContext, x[0]));
 
   for (i = 31; i != -1; i--)
   {
-    gum_arm64_writer_put_str_reg_reg_offset (&cw, ARM64_REG_Q0 + i,
-        ARM64_REG_X0,
+    gum_arm64_writer_put_str_reg_reg_offset (&cw, AArch64_REG_Q0 + i,
+        AArch64_REG_X0,
         G_STRUCT_OFFSET (GumCpuContext, v) + (i * sizeof (GumArm64VectorReg)));
   }
 
@@ -891,19 +891,19 @@ gum_emit_test_clobber_flags_function (gpointer mem,
   gum_arm64_writer_init (&cw, mem);
   cw.pc = ctx->start_address;
 
-  gum_arm64_writer_put_push_reg_reg (&cw, ARM64_REG_X1, ARM64_REG_LR);
+  gum_arm64_writer_put_push_reg_reg (&cw, AArch64_REG_X1, AArch64_REG_LR);
 
-  gum_arm64_writer_put_mov_nzcv_reg (&cw, ARM64_REG_XZR);
-  gum_arm64_writer_put_mov_reg_nzcv (&cw, ARM64_REG_X2);
-  gum_arm64_writer_put_str_reg_reg (&cw, ARM64_REG_X2, ARM64_REG_X0);
+  gum_arm64_writer_put_mov_nzcv_reg (&cw, AArch64_REG_XZR);
+  gum_arm64_writer_put_mov_reg_nzcv (&cw, AArch64_REG_X2);
+  gum_arm64_writer_put_str_reg_reg (&cw, AArch64_REG_X2, AArch64_REG_X0);
 
   gum_arm64_writer_put_bl_imm (&cw,
       gum_strip_code_address (GUM_ADDRESS (ctx->target_func)));
 
-  gum_arm64_writer_put_pop_reg_reg (&cw, ARM64_REG_X1, ARM64_REG_LR);
+  gum_arm64_writer_put_pop_reg_reg (&cw, AArch64_REG_X1, AArch64_REG_LR);
 
-  gum_arm64_writer_put_mov_reg_nzcv (&cw, ARM64_REG_X2);
-  gum_arm64_writer_put_str_reg_reg (&cw, ARM64_REG_X2, ARM64_REG_X1);
+  gum_arm64_writer_put_mov_reg_nzcv (&cw, AArch64_REG_X2);
+  gum_arm64_writer_put_str_reg_reg (&cw, AArch64_REG_X2, AArch64_REG_X1);
 
   gum_arm64_writer_put_ret (&cw);
 

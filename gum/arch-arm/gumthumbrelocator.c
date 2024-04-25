@@ -581,7 +581,7 @@ gum_thumb_relocator_can_relocate (gpointer address,
               n = offset;
           }
           if (id == ARM_INS_B || id == ARM_INS_BX)
-            eoi = d->cc == ARM_CC_INVALID || d->cc == ARM_CC_AL;
+            eoi = d->cc == ARMCC_UNDEF || d->cc == ARMCC_AL;
           break;
         }
         case ARM_INS_POP:
@@ -640,8 +640,8 @@ gum_arm_branch_is_unconditional (const cs_insn * insn)
 {
   switch (insn->detail->arm.cc)
   {
-    case ARM_CC_INVALID:
-    case ARM_CC_AL:
+    case ARMCC_UNDEF:
+    case ARMCC_AL:
       return TRUE;
     default:
       return FALSE;
@@ -902,7 +902,7 @@ gum_thumb_relocator_rewrite_it_block_start (GumThumbRelocator * self,
 {
   GumITBlock * block = &self->it_block;
   const cs_insn * insn = ctx->insn;
-  arm_cc cc = insn->detail->arm.cc;
+  ARMCC_CondCodes cc = insn->detail->arm.cc;
   guint16 it_insn;
 
   memcpy (&it_insn, ctx->insn->bytes, sizeof (guint16));
@@ -915,7 +915,7 @@ gum_thumb_relocator_rewrite_it_block_start (GumThumbRelocator * self,
   block->then_label = self->output->code + 1;
   block->end_label = NULL;
 
-  if (block->cc == ARM_CC_AL)
+  if (block->cc == ARMCC_AL)
     return TRUE;
 
   switch (self->it_branch_type)
@@ -940,7 +940,7 @@ gum_thumb_relocator_rewrite_it_block_else (GumThumbRelocator * self,
 {
   block->end_label = self->output->code + 1;
 
-  if (block->cc == ARM_CC_AL)
+  if (block->cc == ARMCC_AL)
     return;
 
   switch (self->it_branch_type)
@@ -962,7 +962,7 @@ static void
 gum_thumb_relocator_rewrite_it_block_end (GumThumbRelocator * self,
                                           GumITBlock * block)
 {
-  if (block->cc == ARM_CC_AL)
+  if (block->cc == ARMCC_AL)
     return;
 
   gum_commit_it_branch (self->output, &block->then_label);

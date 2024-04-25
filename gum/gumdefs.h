@@ -85,9 +85,9 @@ typedef GumX64CpuContext GumCpuContext;
 # define GUM_PSR_T_BIT 0x20
 typedef GumArmCpuContext GumCpuContext;
 #elif defined (_M_ARM64) || defined (__aarch64__)
-# define GUM_NATIVE_CPU GUM_CPU_ARM64
-# define GUM_DEFAULT_CS_ARCH CS_ARCH_ARM64
-# define gum_cs_arch_register_native cs_arch_register_arm64
+# define GUM_NATIVE_CPU GUM_CPU_AARCH64
+# define GUM_DEFAULT_CS_ARCH CS_ARCH_AARCH64
+# define gum_cs_arch_register_native cs_arch_register_aarch64
 /**
  * GUM_DEFAULT_CS_MODE: (skip)
  */

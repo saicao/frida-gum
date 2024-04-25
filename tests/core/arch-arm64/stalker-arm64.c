@@ -272,20 +272,20 @@ TESTCASE (call_depth)
   gum_arm64_writer_put_b_label (&cw, start_lbl);
 
   func_b = gum_arm64_writer_cur (&cw);
-  gum_arm64_writer_put_add_reg_reg_imm (&cw, ARM64_REG_X0, ARM64_REG_X0, 7);
+  gum_arm64_writer_put_add_reg_reg_imm (&cw, AArch64_REG_X0, AArch64_REG_X0, 7);
   gum_arm64_writer_put_ret (&cw);
 
   func_a = gum_arm64_writer_cur (&cw);
-  gum_arm64_writer_put_push_reg_reg (&cw, ARM64_REG_X19, ARM64_REG_LR);
-  gum_arm64_writer_put_add_reg_reg_imm (&cw, ARM64_REG_X0, ARM64_REG_X0, 3);
+  gum_arm64_writer_put_push_reg_reg (&cw, AArch64_REG_X19, AArch64_REG_LR);
+  gum_arm64_writer_put_add_reg_reg_imm (&cw, AArch64_REG_X0, AArch64_REG_X0, 3);
   gum_arm64_writer_put_bl_imm (&cw, GUM_ADDRESS (func_b));
-  gum_arm64_writer_put_pop_reg_reg (&cw, ARM64_REG_X19, ARM64_REG_LR);
+  gum_arm64_writer_put_pop_reg_reg (&cw, AArch64_REG_X19, AArch64_REG_LR);
   gum_arm64_writer_put_ret (&cw);
 
   gum_arm64_writer_put_label (&cw, start_lbl);
-  gum_arm64_writer_put_push_reg_reg (&cw, ARM64_REG_X19, ARM64_REG_LR);
+  gum_arm64_writer_put_push_reg_reg (&cw, AArch64_REG_X19, AArch64_REG_LR);
   gum_arm64_writer_put_bl_imm (&cw, GUM_ADDRESS (func_a));
-  gum_arm64_writer_put_pop_reg_reg (&cw, ARM64_REG_X19, ARM64_REG_LR);
+  gum_arm64_writer_put_pop_reg_reg (&cw, AArch64_REG_X19, AArch64_REG_LR);
 
   gum_arm64_writer_put_push_all_x_registers (&cw);
   gum_arm64_writer_put_call_address_with_arguments (&cw,
@@ -444,19 +444,19 @@ insert_extra_add_after_sub (GumStalkerIterator * iterator,
 
   while (gum_stalker_iterator_next (iterator, &insn))
   {
-    if (in_leaf_func && insn->id == ARM64_INS_RET)
+    if (in_leaf_func && insn->id == AArch64_INS_RET)
     {
       gum_stalker_iterator_put_callout (iterator, store_x0, last_x0, NULL);
     }
 
     gum_stalker_iterator_keep (iterator);
 
-    if (insn->id == ARM64_INS_SUB)
+    if (insn->id == AArch64_INS_SUB)
     {
       in_leaf_func = TRUE;
 
-      gum_arm64_writer_put_add_reg_reg_imm (output->writer.arm64, ARM64_REG_W0,
-          ARM64_REG_W0, 1);
+      gum_arm64_writer_put_add_reg_reg_imm (output->writer.arm64, AArch64_REG_W0,
+          AArch64_REG_W0, 1);
     }
   }
 }
@@ -692,9 +692,9 @@ modify_to_return_true_after_three_calls (GumStalkerIterator * iterator,
       }
     }
 
-    if (insn->id == ARM64_INS_RET && in_target_function && ctx->n == 3)
+    if (insn->id == AArch64_INS_RET && in_target_function && ctx->n == 3)
     {
-      gum_arm64_writer_put_ldr_reg_u32 (output->writer.arm64, ARM64_REG_W0,
+      gum_arm64_writer_put_ldr_reg_u32 (output->writer.arm64, AArch64_REG_W0,
           TRUE);
     }
 
@@ -832,9 +832,9 @@ modify_to_return_true_on_subsequent_transform (GumStalkerIterator * iterator,
         ctx->n++;
     }
 
-    if (insn->id == ARM64_INS_RET && in_target_function && ctx->n > 1)
+    if (insn->id == AArch64_INS_RET && in_target_function && ctx->n > 1)
     {
-      gum_arm64_writer_put_ldr_reg_u32 (output->writer.arm64, ARM64_REG_W0,
+      gum_arm64_writer_put_ldr_reg_u32 (output->writer.arm64, AArch64_REG_W0,
           TRUE);
     }
 
@@ -893,14 +893,14 @@ add_n_return_value_increments (GumStalkerIterator * iterator,
           insn->address == GPOINTER_TO_SIZE (ctx->target_function);
     }
 
-    if (insn->id == ARM64_INS_RET && in_target_function)
+    if (insn->id == AArch64_INS_RET && in_target_function)
     {
       guint increment_index;
 
       for (increment_index = 0; increment_index != ctx->n; increment_index++)
       {
         gum_arm64_writer_put_add_reg_reg_imm (output->writer.arm64,
-            ARM64_REG_W0, ARM64_REG_W0, 1);
+            AArch64_REG_W0, AArch64_REG_W0, 1);
       }
     }
 
@@ -983,15 +983,15 @@ TESTCASE (exclude_blr)
   gum_arm64_writer_put_b_label (&cw, start_lbl);
 
   func_a = gum_arm64_writer_cur (&cw);
-  gum_arm64_writer_put_add_reg_reg_imm (&cw, ARM64_REG_X0, ARM64_REG_X0, 10);
+  gum_arm64_writer_put_add_reg_reg_imm (&cw, AArch64_REG_X0, AArch64_REG_X0, 10);
   gum_arm64_writer_put_ret (&cw);
 
   gum_arm64_writer_put_label (&cw, start_lbl);
-  gum_arm64_writer_put_push_reg_reg (&cw, ARM64_REG_X19, ARM64_REG_LR);
-  gum_arm64_writer_put_ldr_reg_address (&cw, ARM64_REG_X1,
+  gum_arm64_writer_put_push_reg_reg (&cw, AArch64_REG_X19, AArch64_REG_LR);
+  gum_arm64_writer_put_ldr_reg_address (&cw, AArch64_REG_X1,
       GUM_ADDRESS (gum_sign_code_pointer (func_a)));
-  gum_arm64_writer_put_blr_reg (&cw, ARM64_REG_X1);
-  gum_arm64_writer_put_pop_reg_reg (&cw, ARM64_REG_X19, ARM64_REG_LR);
+  gum_arm64_writer_put_blr_reg (&cw, AArch64_REG_X1);
+  gum_arm64_writer_put_pop_reg_reg (&cw, AArch64_REG_X19, AArch64_REG_LR);
 
   gum_arm64_writer_put_push_all_x_registers (&cw);
   gum_arm64_writer_put_call_address_with_arguments (&cw,
@@ -1049,21 +1049,21 @@ TESTCASE (exclude_bl_with_unfollow)
   gum_arm64_writer_put_b_label (&cw, start_lbl);
 
   func_a = gum_arm64_writer_cur (&cw);
-  gum_arm64_writer_put_push_reg_reg (&cw, ARM64_REG_X19, ARM64_REG_LR);
-  gum_arm64_writer_put_add_reg_reg_imm (&cw, ARM64_REG_X0, ARM64_REG_X0, 10);
+  gum_arm64_writer_put_push_reg_reg (&cw, AArch64_REG_X19, AArch64_REG_LR);
+  gum_arm64_writer_put_add_reg_reg_imm (&cw, AArch64_REG_X0, AArch64_REG_X0, 10);
   gum_arm64_writer_put_push_all_x_registers (&cw);
   gum_arm64_writer_put_call_address_with_arguments (&cw,
       GUM_ADDRESS (gum_stalker_unfollow_me), 1,
       GUM_ARG_ADDRESS, GUM_ADDRESS (fixture->stalker));
   gum_arm64_writer_put_pop_all_x_registers (&cw);
-  gum_arm64_writer_put_pop_reg_reg (&cw, ARM64_REG_X19, ARM64_REG_LR);
+  gum_arm64_writer_put_pop_reg_reg (&cw, AArch64_REG_X19, AArch64_REG_LR);
   gum_arm64_writer_put_ret (&cw);
 
   gum_arm64_writer_put_label (&cw, start_lbl);
 
-  gum_arm64_writer_put_push_reg_reg (&cw, ARM64_REG_X19, ARM64_REG_LR);
+  gum_arm64_writer_put_push_reg_reg (&cw, AArch64_REG_X19, AArch64_REG_LR);
   gum_arm64_writer_put_bl_imm (&cw, GUM_ADDRESS (func_a));
-  gum_arm64_writer_put_pop_reg_reg (&cw, ARM64_REG_X19, ARM64_REG_LR);
+  gum_arm64_writer_put_pop_reg_reg (&cw, AArch64_REG_X19, AArch64_REG_LR);
 
   gum_arm64_writer_put_ret (&cw);
 
@@ -1111,23 +1111,23 @@ TESTCASE (exclude_blr_with_unfollow)
   gum_arm64_writer_put_b_label (&cw, start_lbl);
 
   func_a = gum_arm64_writer_cur (&cw);
-  gum_arm64_writer_put_push_reg_reg (&cw, ARM64_REG_X19, ARM64_REG_LR);
-  gum_arm64_writer_put_add_reg_reg_imm (&cw, ARM64_REG_X0, ARM64_REG_X0, 10);
+  gum_arm64_writer_put_push_reg_reg (&cw, AArch64_REG_X19, AArch64_REG_LR);
+  gum_arm64_writer_put_add_reg_reg_imm (&cw, AArch64_REG_X0, AArch64_REG_X0, 10);
   gum_arm64_writer_put_push_all_x_registers (&cw);
   gum_arm64_writer_put_call_address_with_arguments (&cw,
       GUM_ADDRESS (gum_stalker_unfollow_me), 1,
       GUM_ARG_ADDRESS, GUM_ADDRESS (fixture->stalker));
   gum_arm64_writer_put_pop_all_x_registers (&cw);
-  gum_arm64_writer_put_pop_reg_reg (&cw, ARM64_REG_X19, ARM64_REG_LR);
+  gum_arm64_writer_put_pop_reg_reg (&cw, AArch64_REG_X19, AArch64_REG_LR);
   gum_arm64_writer_put_ret (&cw);
 
   gum_arm64_writer_put_label (&cw, start_lbl);
 
-  gum_arm64_writer_put_push_reg_reg (&cw, ARM64_REG_X19, ARM64_REG_LR);
-  gum_arm64_writer_put_ldr_reg_address (&cw, ARM64_REG_X1,
+  gum_arm64_writer_put_push_reg_reg (&cw, AArch64_REG_X19, AArch64_REG_LR);
+  gum_arm64_writer_put_ldr_reg_address (&cw, AArch64_REG_X1,
       GUM_ADDRESS (gum_sign_code_pointer (func_a)));
-  gum_arm64_writer_put_blr_reg (&cw, ARM64_REG_X1);
-  gum_arm64_writer_put_pop_reg_reg (&cw, ARM64_REG_X19, ARM64_REG_LR);
+  gum_arm64_writer_put_blr_reg (&cw, AArch64_REG_X1);
+  gum_arm64_writer_put_pop_reg_reg (&cw, AArch64_REG_X19, AArch64_REG_LR);
 
   gum_arm64_writer_put_ret (&cw);
 
@@ -1174,7 +1174,7 @@ TESTCASE (unconditional_branch)
   gum_arm64_writer_put_b_label (&cw, my_ken_lbl);
 
   address = GUM_ADDRESS (gum_arm64_writer_cur (&cw));
-  gum_arm64_writer_put_add_reg_reg_imm (&cw, ARM64_REG_X0, ARM64_REG_X0, 10);
+  gum_arm64_writer_put_add_reg_reg_imm (&cw, AArch64_REG_X0, AArch64_REG_X0, 10);
 
   gum_arm64_writer_put_push_all_x_registers (&cw);
   gum_arm64_writer_put_call_address_with_arguments (&cw,
@@ -1185,7 +1185,7 @@ TESTCASE (unconditional_branch)
   gum_arm64_writer_put_ret (&cw);
 
   gum_arm64_writer_put_label (&cw, my_ken_lbl);
-  gum_arm64_writer_put_add_reg_reg_imm (&cw, ARM64_REG_X0, ARM64_REG_X0, 1);
+  gum_arm64_writer_put_add_reg_reg_imm (&cw, AArch64_REG_X0, AArch64_REG_X0, 1);
   gum_arm64_writer_put_b_imm (&cw, address);
 
   gum_arm64_writer_flush (&cw);
@@ -1207,7 +1207,7 @@ TESTCASE (unconditional_branch_reg)
   GumAddress address;
   const gchar * my_ken_lbl = "my_ken";
   StalkerTestFunc func;
-  arm64_reg reg = ARM64_REG_X13;
+  aarch64_reg reg = AArch64_REG_X13;
 
   code = gum_alloc_n_pages (1, GUM_PAGE_RW);
   gum_arm64_writer_init (&cw, code);
@@ -1225,9 +1225,9 @@ TESTCASE (unconditional_branch_reg)
   gum_arm64_writer_put_b_label (&cw, my_ken_lbl);
 
   address = GUM_ADDRESS (gum_arm64_writer_cur (&cw));
-  gum_arm64_writer_put_add_reg_reg_imm (&cw, ARM64_REG_X0, ARM64_REG_X0, 10);
-  if (reg == ARM64_REG_X29 || reg == ARM64_REG_X30)
-    gum_arm64_writer_put_pop_reg_reg (&cw, reg, ARM64_REG_XZR);
+  gum_arm64_writer_put_add_reg_reg_imm (&cw, AArch64_REG_X0, AArch64_REG_X0, 10);
+  if (reg == AArch64_REG_X29 || reg == AArch64_REG_X30)
+    gum_arm64_writer_put_pop_reg_reg (&cw, reg, AArch64_REG_XZR);
 
   gum_arm64_writer_put_push_all_x_registers (&cw);
   gum_arm64_writer_put_call_address_with_arguments (&cw,
@@ -1238,8 +1238,8 @@ TESTCASE (unconditional_branch_reg)
   gum_arm64_writer_put_ret (&cw);
 
   gum_arm64_writer_put_label (&cw, my_ken_lbl);
-  gum_arm64_writer_put_add_reg_reg_imm (&cw, ARM64_REG_X0, ARM64_REG_X0, 1);
-  if (reg == ARM64_REG_X29 || reg == ARM64_REG_X30)
+  gum_arm64_writer_put_add_reg_reg_imm (&cw, AArch64_REG_X0, AArch64_REG_X0, 1);
+  if (reg == AArch64_REG_X29 || reg == AArch64_REG_X30)
     gum_arm64_writer_put_push_reg_reg (&cw, reg, reg);
   gum_arm64_writer_put_ldr_reg_address (&cw, reg, address);
   gum_arm64_writer_put_br_reg (&cw, reg);
@@ -1261,7 +1261,7 @@ TESTCASE (conditional_branch)
   guint8 * code;
   GumArm64Writer cw;
   GumAddress address;
-  arm64_cc cc = ARM64_CC_EQ;
+  AArch64CC_CondCode cc = AArch64CC_EQ;
   const gchar * my_ken_lbl = "my_ken";
   StalkerTestFunc func;
   gint r;
@@ -1294,7 +1294,7 @@ TESTCASE (conditional_branch)
   gum_arm64_writer_put_ret (&cw);
 
   gum_arm64_writer_put_label (&cw, my_ken_lbl);
-  gum_arm64_writer_put_add_reg_reg_imm (&cw, ARM64_REG_X0, ARM64_REG_X0, 1);
+  gum_arm64_writer_put_add_reg_reg_imm (&cw, AArch64_REG_X0, AArch64_REG_X0, 1);
   gum_arm64_writer_put_b_imm (&cw, address);
 
   gum_arm64_writer_flush (&cw);
@@ -1332,8 +1332,8 @@ TESTCASE (compare_and_branch)
 
   gum_arm64_writer_put_nop (&cw);
   gum_arm64_writer_put_nop (&cw);
-  gum_arm64_writer_put_sub_reg_reg_imm (&cw, ARM64_REG_X0, ARM64_REG_X0, 2);
-  gum_arm64_writer_put_cbz_reg_label (&cw, ARM64_REG_X0, my_ken_lbl);
+  gum_arm64_writer_put_sub_reg_reg_imm (&cw, AArch64_REG_X0, AArch64_REG_X0, 2);
+  gum_arm64_writer_put_cbz_reg_label (&cw, AArch64_REG_X0, my_ken_lbl);
 
   gum_arm64_writer_put_label (&cw, my_nken_lbl);
   gum_arm64_writer_put_nop (&cw);
@@ -1347,8 +1347,8 @@ TESTCASE (compare_and_branch)
   gum_arm64_writer_put_ret (&cw);
 
   gum_arm64_writer_put_label (&cw, my_ken_lbl);
-  gum_arm64_writer_put_add_reg_reg_imm (&cw, ARM64_REG_X0, ARM64_REG_X0, 1);
-  gum_arm64_writer_put_cbnz_reg_label (&cw, ARM64_REG_X0, my_nken_lbl);
+  gum_arm64_writer_put_add_reg_reg_imm (&cw, AArch64_REG_X0, AArch64_REG_X0, 1);
+  gum_arm64_writer_put_cbnz_reg_label (&cw, AArch64_REG_X0, my_nken_lbl);
 
   gum_arm64_writer_flush (&cw);
   gum_memory_mark_code (code, gum_arm64_writer_offset (&cw));
@@ -1385,8 +1385,8 @@ TESTCASE (test_bit_and_branch)
 
   gum_arm64_writer_put_nop (&cw);
   gum_arm64_writer_put_nop (&cw);
-  gum_arm64_writer_put_sub_reg_reg_imm (&cw, ARM64_REG_X0, ARM64_REG_X0, 2);
-  gum_arm64_writer_put_tbz_reg_imm_label (&cw, ARM64_REG_W0, 0, my_ken_lbl);
+  gum_arm64_writer_put_sub_reg_reg_imm (&cw, AArch64_REG_X0, AArch64_REG_X0, 2);
+  gum_arm64_writer_put_tbz_reg_imm_label (&cw, AArch64_REG_W0, 0, my_ken_lbl);
 
   gum_arm64_writer_put_label (&cw, my_nken_lbl);
   gum_arm64_writer_put_nop (&cw);
@@ -1400,8 +1400,8 @@ TESTCASE (test_bit_and_branch)
   gum_arm64_writer_put_ret (&cw);
 
   gum_arm64_writer_put_label (&cw, my_ken_lbl);
-  gum_arm64_writer_put_add_reg_reg_imm (&cw, ARM64_REG_X0, ARM64_REG_X0, 1);
-  gum_arm64_writer_put_tbnz_reg_imm_label (&cw, ARM64_REG_W0, 0, my_nken_lbl);
+  gum_arm64_writer_put_add_reg_reg_imm (&cw, AArch64_REG_X0, AArch64_REG_X0, 1);
+  gum_arm64_writer_put_tbnz_reg_imm_label (&cw, AArch64_REG_W0, 0, my_nken_lbl);
 
   gum_arm64_writer_flush (&cw);
   gum_memory_mark_code (code, gum_arm64_writer_offset (&cw));
@@ -1428,13 +1428,13 @@ TESTCASE (follow_std_call)
   code = gum_alloc_n_pages (1, GUM_PAGE_RW);
   gum_arm64_writer_init (&cw, code);
 
-  gum_arm64_writer_put_push_reg_reg (&cw, ARM64_REG_X30, ARM64_REG_X29);
-  gum_arm64_writer_put_mov_reg_reg (&cw, ARM64_REG_X29, ARM64_REG_SP);
+  gum_arm64_writer_put_push_reg_reg (&cw, AArch64_REG_X30, AArch64_REG_X29);
+  gum_arm64_writer_put_mov_reg_reg (&cw, AArch64_REG_X29, AArch64_REG_SP);
 
   gum_arm64_writer_put_b_label (&cw, my_ken_lbl);
 
   address = GUM_ADDRESS (gum_arm64_writer_cur (&cw));
-  gum_arm64_writer_put_add_reg_reg_imm (&cw, ARM64_REG_X0, ARM64_REG_X0, 1);
+  gum_arm64_writer_put_add_reg_reg_imm (&cw, AArch64_REG_X0, AArch64_REG_X0, 1);
   gum_arm64_writer_put_ret (&cw);
 
   gum_arm64_writer_put_label (&cw, my_ken_lbl);
@@ -1445,7 +1445,7 @@ TESTCASE (follow_std_call)
       GUM_ARG_ADDRESS, GUM_ADDRESS (fixture->transformer),
       GUM_ARG_ADDRESS, GUM_ADDRESS (fixture->sink));
   gum_arm64_writer_put_pop_all_x_registers (&cw);
-  gum_arm64_writer_put_add_reg_reg_imm (&cw, ARM64_REG_X0, ARM64_REG_X0, 1);
+  gum_arm64_writer_put_add_reg_reg_imm (&cw, AArch64_REG_X0, AArch64_REG_X0, 1);
   gum_arm64_writer_put_bl_imm (&cw, address);
 
   gum_arm64_writer_put_push_all_x_registers (&cw);
@@ -1454,7 +1454,7 @@ TESTCASE (follow_std_call)
       GUM_ARG_ADDRESS, GUM_ADDRESS (fixture->stalker));
   gum_arm64_writer_put_pop_all_x_registers (&cw);
 
-  gum_arm64_writer_put_pop_reg_reg (&cw, ARM64_REG_X30, ARM64_REG_X29);
+  gum_arm64_writer_put_pop_reg_reg (&cw, AArch64_REG_X30, AArch64_REG_X29);
   gum_arm64_writer_put_ret (&cw);
 
   gum_arm64_writer_flush (&cw);
@@ -1482,8 +1482,8 @@ TESTCASE (follow_return)
   code = gum_alloc_n_pages (1, GUM_PAGE_RW);
   gum_arm64_writer_init (&cw, code);
 
-  gum_arm64_writer_put_push_reg_reg (&cw, ARM64_REG_X30, ARM64_REG_X29);
-  gum_arm64_writer_put_mov_reg_reg (&cw, ARM64_REG_X29, ARM64_REG_SP);
+  gum_arm64_writer_put_push_reg_reg (&cw, AArch64_REG_X30, AArch64_REG_X29);
+  gum_arm64_writer_put_mov_reg_reg (&cw, AArch64_REG_X29, AArch64_REG_SP);
 
   gum_arm64_writer_put_b_label (&cw, my_ken_lbl);
 
@@ -1497,16 +1497,16 @@ TESTCASE (follow_return)
   gum_arm64_writer_put_pop_all_x_registers (&cw);
   /*
    * alternative for instruction RET X15
-   * gum_arm64_writer_put_mov_reg_reg (&cw, ARM64_REG_X15, ARM64_REG_X30);
+   * gum_arm64_writer_put_mov_reg_reg (&cw, AArch64_REG_X15, AArch64_REG_X30);
    * gum_arm64_writer_put_instruction (&cw, 0xD65F01E0);
    */
   gum_arm64_writer_put_ret (&cw);
 
   gum_arm64_writer_put_label (&cw, my_ken_lbl);
   gum_arm64_writer_put_nop (&cw);
-  gum_arm64_writer_put_add_reg_reg_imm (&cw, ARM64_REG_X0, ARM64_REG_X0, 1);
+  gum_arm64_writer_put_add_reg_reg_imm (&cw, AArch64_REG_X0, AArch64_REG_X0, 1);
   gum_arm64_writer_put_bl_imm (&cw, address);
-  gum_arm64_writer_put_add_reg_reg_imm (&cw, ARM64_REG_X0, ARM64_REG_X0, 1);
+  gum_arm64_writer_put_add_reg_reg_imm (&cw, AArch64_REG_X0, AArch64_REG_X0, 1);
 
   gum_arm64_writer_put_push_all_x_registers (&cw);
   gum_arm64_writer_put_call_address_with_arguments (&cw,
@@ -1514,7 +1514,7 @@ TESTCASE (follow_return)
       GUM_ARG_ADDRESS, GUM_ADDRESS (fixture->stalker));
   gum_arm64_writer_put_pop_all_x_registers (&cw);
 
-  gum_arm64_writer_put_pop_reg_reg (&cw, ARM64_REG_X30, ARM64_REG_X29);
+  gum_arm64_writer_put_pop_reg_reg (&cw, AArch64_REG_X30, AArch64_REG_X29);
   gum_arm64_writer_put_ret (&cw);
 
   gum_arm64_writer_flush (&cw);
@@ -1837,7 +1837,7 @@ insert_callout_after_cmp (GumStalkerIterator * iterator,
   {
     gum_stalker_iterator_keep (iterator);
 
-    if (insn->id == ARM64_INS_CMP && access == GUM_MEMORY_ACCESS_OPEN)
+    if (insn->id == AArch64_INS_ALIAS_CMP && access == GUM_MEMORY_ACCESS_OPEN)
     {
       gum_stalker_iterator_put_callout (iterator, bump_num_cmp_callouts,
           num_cmp_callouts, NULL);
@@ -1942,12 +1942,12 @@ TESTCASE (no_register_clobber)
       GUM_ARG_ADDRESS, GUM_ADDRESS (fixture->sink));
   gum_arm64_writer_put_pop_all_x_registers (&cw);
 
-  for (i = ARM64_REG_X0; i <= ARM64_REG_X28; i++)
+  for (i = AArch64_REG_X0; i <= AArch64_REG_X28; i++)
   {
     gum_arm64_writer_put_ldr_reg_u64 (&cw, i, i);
   }
-  gum_arm64_writer_put_ldr_reg_u64 (&cw, ARM64_REG_FP, ARM64_REG_FP);
-  gum_arm64_writer_put_ldr_reg_u64 (&cw, ARM64_REG_LR, ARM64_REG_LR);
+  gum_arm64_writer_put_ldr_reg_u64 (&cw, AArch64_REG_FP, AArch64_REG_FP);
+  gum_arm64_writer_put_ldr_reg_u64 (&cw, AArch64_REG_LR, AArch64_REG_LR);
 
   gum_arm64_writer_put_push_all_x_registers (&cw);
   gum_arm64_writer_put_call_address_with_arguments (&cw,
@@ -1955,21 +1955,21 @@ TESTCASE (no_register_clobber)
       GUM_ARG_ADDRESS, GUM_ADDRESS (fixture->stalker));
   gum_arm64_writer_put_pop_all_x_registers (&cw);
 
-  gum_arm64_writer_put_push_reg_reg (&cw, ARM64_REG_FP, ARM64_REG_LR);
-  gum_arm64_writer_put_ldr_reg_reg_offset (&cw, ARM64_REG_FP, ARM64_REG_SP,
+  gum_arm64_writer_put_push_reg_reg (&cw, AArch64_REG_FP, AArch64_REG_LR);
+  gum_arm64_writer_put_ldr_reg_reg_offset (&cw, AArch64_REG_FP, AArch64_REG_SP,
       (2 + 30) * sizeof (gpointer));
-  for (i = ARM64_REG_X0; i <= ARM64_REG_X28; i++)
+  for (i = AArch64_REG_X0; i <= AArch64_REG_X28; i++)
   {
-    gum_arm64_writer_put_str_reg_reg_offset (&cw, i, ARM64_REG_FP,
-        G_STRUCT_OFFSET (GumCpuContext, x[i - ARM64_REG_X0]));
+    gum_arm64_writer_put_str_reg_reg_offset (&cw, i, AArch64_REG_FP,
+        G_STRUCT_OFFSET (GumCpuContext, x[i - AArch64_REG_X0]));
   }
-  gum_arm64_writer_put_pop_reg_reg (&cw, ARM64_REG_FP, ARM64_REG_LR);
+  gum_arm64_writer_put_pop_reg_reg (&cw, AArch64_REG_FP, AArch64_REG_LR);
 
-  gum_arm64_writer_put_ldr_reg_reg_offset (&cw, ARM64_REG_X0, ARM64_REG_SP,
+  gum_arm64_writer_put_ldr_reg_reg_offset (&cw, AArch64_REG_X0, AArch64_REG_SP,
       30 * sizeof (gpointer));
-  gum_arm64_writer_put_str_reg_reg_offset (&cw, ARM64_REG_FP, ARM64_REG_X0,
+  gum_arm64_writer_put_str_reg_reg_offset (&cw, AArch64_REG_FP, AArch64_REG_X0,
       G_STRUCT_OFFSET (GumCpuContext, fp));
-  gum_arm64_writer_put_str_reg_reg_offset (&cw, ARM64_REG_LR, ARM64_REG_X0,
+  gum_arm64_writer_put_str_reg_reg_offset (&cw, AArch64_REG_LR, AArch64_REG_X0,
       G_STRUCT_OFFSET (GumCpuContext, lr));
 
   gum_arm64_writer_put_pop_all_x_registers (&cw);
@@ -1983,12 +1983,12 @@ TESTCASE (no_register_clobber)
   func = GUM_POINTER_TO_FUNCPTR (ClobberFunc, code);
   func (&ctx);
 
-  for (i = ARM64_REG_X0; i <= ARM64_REG_X28; i++)
+  for (i = AArch64_REG_X0; i <= AArch64_REG_X28; i++)
   {
-    g_assert_cmphex (ctx.x[i - ARM64_REG_X0], ==, i);
+    g_assert_cmphex (ctx.x[i - AArch64_REG_X0], ==, i);
   }
-  g_assert_cmphex (ctx.fp, ==, ARM64_REG_FP);
-  g_assert_cmphex (ctx.lr, ==, ARM64_REG_LR);
+  g_assert_cmphex (ctx.fp, ==, AArch64_REG_FP);
+  g_assert_cmphex (ctx.lr, ==, AArch64_REG_LR);
 
   gum_free_pages (code);
 #endif

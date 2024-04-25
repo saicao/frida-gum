@@ -70,19 +70,19 @@ gum_emit_lr_thunk (gpointer mem,
   aw.pc = GUM_ADDRESS (ctx->code);
 
   ctx->run = gum_sign_code_pointer (GSIZE_TO_POINTER (aw.pc));
-  gum_arm64_writer_put_push_reg_reg (&aw, ARM64_REG_X19, ARM64_REG_LR);
+  gum_arm64_writer_put_push_reg_reg (&aw, AArch64_REG_X19, AArch64_REG_LR);
   gum_arm64_writer_put_bl_label (&aw, thunk_start);
   ctx->expected_lr = aw.pc;
-  gum_arm64_writer_put_pop_reg_reg (&aw, ARM64_REG_X19, ARM64_REG_LR);
+  gum_arm64_writer_put_pop_reg_reg (&aw, AArch64_REG_X19, AArch64_REG_LR);
   gum_arm64_writer_put_ret (&aw);
 
   ctx->thunk = GSIZE_TO_POINTER (aw.pc);
   gum_arm64_writer_put_label (&aw, thunk_start);
-  gum_arm64_writer_put_mov_reg_reg (&aw, ARM64_REG_X3, ARM64_REG_LR);
+  gum_arm64_writer_put_mov_reg_reg (&aw, AArch64_REG_X3, AArch64_REG_LR);
   gum_arm64_writer_put_b_label (&aw, inner_start);
 
   gum_arm64_writer_put_label (&aw, inner_start);
-  gum_arm64_writer_put_mov_reg_reg (&aw, ARM64_REG_X0, ARM64_REG_X3);
+  gum_arm64_writer_put_mov_reg_reg (&aw, AArch64_REG_X0, AArch64_REG_X3);
   gum_arm64_writer_put_ret (&aw);
 
   gum_arm64_writer_clear (&aw);
@@ -124,19 +124,19 @@ gum_emit_lr_func (gpointer mem,
   aw.pc = GUM_ADDRESS (ctx->code);
 
   ctx->run = gum_sign_code_pointer (GSIZE_TO_POINTER (aw.pc));
-  gum_arm64_writer_put_push_reg_reg (&aw, ARM64_REG_X19, ARM64_REG_LR);
+  gum_arm64_writer_put_push_reg_reg (&aw, AArch64_REG_X19, AArch64_REG_LR);
   gum_arm64_writer_put_bl_label (&aw, func_start);
   ctx->caller_lr = aw.pc;
-  gum_arm64_writer_put_pop_reg_reg (&aw, ARM64_REG_X19, ARM64_REG_LR);
+  gum_arm64_writer_put_pop_reg_reg (&aw, AArch64_REG_X19, AArch64_REG_LR);
   gum_arm64_writer_put_ret (&aw);
 
   ctx->func = GSIZE_TO_POINTER (aw.pc);
   gum_arm64_writer_put_label (&aw, func_start);
-  gum_arm64_writer_put_push_reg_reg (&aw, ARM64_REG_X19, ARM64_REG_X20);
+  gum_arm64_writer_put_push_reg_reg (&aw, AArch64_REG_X19, AArch64_REG_X20);
   gum_arm64_writer_put_nop (&aw);
   gum_arm64_writer_put_nop (&aw);
-  gum_arm64_writer_put_mov_reg_reg (&aw, ARM64_REG_X0, ARM64_REG_LR);
-  gum_arm64_writer_put_pop_reg_reg (&aw, ARM64_REG_X19, ARM64_REG_X20);
+  gum_arm64_writer_put_mov_reg_reg (&aw, AArch64_REG_X0, AArch64_REG_LR);
+  gum_arm64_writer_put_pop_reg_reg (&aw, AArch64_REG_X19, AArch64_REG_X20);
   gum_arm64_writer_put_ret (&aw);
 
   gum_arm64_writer_clear (&aw);

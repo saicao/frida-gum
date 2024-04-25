@@ -649,7 +649,7 @@ gum_disassemble_instruction_at (gconstpointer address,
       (((context->cpsr & GUM_PSR_T_BIT) != 0) ? CS_MODE_THUMB : CS_MODE_ARM) |
       CS_MODE_V8 | GUM_DEFAULT_CS_ENDIAN, &capstone);
 #elif defined (HAVE_ARM64)
-  err = cs_open (CS_ARCH_ARM64, GUM_DEFAULT_CS_ENDIAN, &capstone);
+  err = cs_open (CS_ARCH_AARCH64, GUM_DEFAULT_CS_ENDIAN, &capstone);
 #else
   return NULL;
 #endif
@@ -787,16 +787,16 @@ gum_infer_arm64_memory_operation (cs_insn * insn)
 {
   switch (insn->id)
   {
-    case ARM64_INS_STRB:
-    case ARM64_INS_STURB:
-    case ARM64_INS_STUR:
-    case ARM64_INS_STR:
-    case ARM64_INS_STP:
-    case ARM64_INS_STNP:
-    case ARM64_INS_STXR:
-    case ARM64_INS_STXRH:
-    case ARM64_INS_STLXRH:
-    case ARM64_INS_STXRB:
+    case AArch64_INS_STRB:
+    case AArch64_INS_STURB:
+    case AArch64_INS_STUR:
+    case AArch64_INS_STR:
+    case AArch64_INS_STP:
+    case AArch64_INS_STNP:
+    case AArch64_INS_STXR:
+    case AArch64_INS_STXRH:
+    case AArch64_INS_STLXRH:
+    case AArch64_INS_STXRB:
       return GUM_MEMOP_WRITE;
     default:
       return GUM_MEMOP_READ;

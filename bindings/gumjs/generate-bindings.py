@@ -2264,10 +2264,10 @@ writer_enums = {
             "q0", "q1", "q2", "q3", "q4", "q5", "q6", "q7", "q8", "q9",
             "q10", "q11", "q12", "q13", "q14", "q15",
         ]),
-        ("arm_system_register", "arm_sysreg", "ARM_SYSREG_", [
+        ("arm_system_register", "arm_sysreg", "ARM_MCLASSSYSREG_", [
             "apsr-nzcvq",
         ]),
-        ("arm_condition_code", "arm_cc", "ARM_CC_", [
+        ("arm_condition_code", "ARMCC_CondCodes", "ARMCC_", [
             "eq", "ne", "hs", "lo", "mi", "pl", "vs", "vc",
             "hi", "ls", "ge", "lt", "gt", "le", "al",
         ]),
@@ -2278,7 +2278,7 @@ writer_enums = {
     ],
     "thumb": [],
     "arm64": [
-        ("arm64_register", "arm64_reg", "ARM64_REG_", [
+        ("arm64_register", "aarch64_reg", "AArch64_REG_", [
             "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9",
             "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "x18", "x19",
             "x20", "x21", "x22", "x23", "x24", "x25", "x26", "x27", "x28", "x29",
@@ -2302,7 +2302,7 @@ writer_enums = {
             "q20", "q21", "q22", "q23", "q24", "q25", "q26", "q27", "q28", "q29",
             "q30", "q31",
         ]),
-        ("arm64_condition_code", "arm64_cc", "ARM64_CC_", [
+        ("arm64_condition_code", "AArch64CC_CondCode", "AArch64CC_", [
             "eq", "ne", "hs", "lo", "mi", "pl", "vs", "vc",
             "hi", "ls", "ge", "lt", "gt", "le", "al", "nv",
         ]),
@@ -2963,6 +2963,9 @@ class Component(object):
         self.gumjs_function_prefix = "gumjs_{0}_{1}".format(flavor, name)
         self.module_struct_name = to_camel_case("gum_{0}_code_{1}".format(namespace, name), start_high=True)
         self.register_type = "GumX86Reg" if arch == "x86" else arch + "_reg"
+        if(arch=="arm64"):
+            self.register_type="aarch64_reg"
+        
 
 class Api(object):
     def __init__(self, static_methods, instance_methods):
@@ -3024,7 +3027,7 @@ class MethodArgument(object):
         name_raw = None
         converter = None
 
-        if type in ("GumX86Reg", "arm_reg", "arm64_reg", "mips_reg"):
+        if type in ("GumX86Reg", "arm_reg", "aarch64_reg", "mips_reg"):
             self.type_raw = "const gchar *"
             self.type_format = "s"
             self.type_ts = to_camel_case("x86_register" if type == "GumX86Reg" else type.replace("_reg", "_register"), start_high=True)
@@ -3106,10 +3109,10 @@ class MethodArgument(object):
             self.type_format = "s"
             self.type_ts = "X86PointerTarget"
             converter = "pointer_target"
-        elif type in ("arm_cc", "arm64_cc"):
+        elif type in ("ARMCC_CondCodes", "AArch64CC_CondCode"):
             self.type_raw = "const gchar *"
             self.type_format = "s"
-            self.type_ts = "ArmConditionCode" if type == "arm_cc" else "Arm64ConditionCode"
+            self.type_ts = "ArmConditionCode" if type == "ARMCC_CondCodes" else "AArch64CC_CondCode"
             converter = "condition_code"
         elif type == "arm_shifter":
             self.type_raw = "const gchar *"

@@ -27,7 +27,7 @@
 # include <stdlib.h>
 #endif
 
-#define GUM_ARM64_LOGICAL_PAGE_SIZE 4096
+#define GUM_AArch64_LOGICAL_PAGE_SIZE 4096
 
 #define GUM_FRAME_OFFSET_CPU_CONTEXT 0
 #define GUM_FRAME_OFFSET_NEXT_HOP \
@@ -54,7 +54,7 @@ struct _GumInterceptorBackend
 struct _GumArm64FunctionContextData
 {
   guint redirect_code_size;
-  arm64_reg scratch_reg;
+  aarch64_reg scratch_reg;
 };
 
 G_STATIC_ASSERT (sizeof (GumArm64FunctionContextData)
@@ -651,9 +651,9 @@ gum_interceptor_backend_prepare_trampoline (GumInterceptorBackend * self,
 
       spec.near_address = GSIZE_TO_POINTER (
           GPOINTER_TO_SIZE (function_address) &
-          ~((gsize) (GUM_ARM64_LOGICAL_PAGE_SIZE - 1)));
+          ~((gsize) (GUM_AArch64_LOGICAL_PAGE_SIZE - 1)));
       spec.max_distance = GUM_ARM64_ADRP_MAX_DISTANCE;
-      alignment = GUM_ARM64_LOGICAL_PAGE_SIZE;
+      alignment = GUM_AArch64_LOGICAL_PAGE_SIZE;
     }
     else if (redirect_limit >= 4)
     {
@@ -677,7 +677,7 @@ gum_interceptor_backend_prepare_trampoline (GumInterceptorBackend * self,
     }
   }
 
-  if (data->scratch_reg == ARM64_REG_INVALID)
+  if (data->scratch_reg == AArch64_REG_INVALID)
     goto no_scratch_reg;
 
   return TRUE;
@@ -742,22 +742,22 @@ _gum_interceptor_backend_create_trampoline (GumInterceptorBackend * self,
       return FALSE;
     }
 
-    gum_arm64_writer_put_pop_reg_reg (aw, ARM64_REG_X0, ARM64_REG_LR);
+    gum_arm64_writer_put_pop_reg_reg (aw, AArch64_REG_X0, AArch64_REG_LR);
   }
 
   if (ctx->type != GUM_INTERCEPTOR_TYPE_FAST)
   {
-    gum_arm64_writer_put_ldr_reg_address (aw, ARM64_REG_X17, GUM_ADDRESS (ctx));
-    gum_arm64_writer_put_ldr_reg_address (aw, ARM64_REG_X16,
+    gum_arm64_writer_put_ldr_reg_address (aw, AArch64_REG_X17, GUM_ADDRESS (ctx));
+    gum_arm64_writer_put_ldr_reg_address (aw, AArch64_REG_X16,
         GUM_ADDRESS (gum_sign_code_pointer (self->enter_thunk)));
-    gum_arm64_writer_put_br_reg (aw, ARM64_REG_X16);
+    gum_arm64_writer_put_br_reg (aw, AArch64_REG_X16);
 
     ctx->on_leave_trampoline = gum_arm64_writer_cur (aw);
 
-    gum_arm64_writer_put_ldr_reg_address (aw, ARM64_REG_X17, GUM_ADDRESS (ctx));
-    gum_arm64_writer_put_ldr_reg_address (aw, ARM64_REG_X16,
+    gum_arm64_writer_put_ldr_reg_address (aw, AArch64_REG_X17, GUM_ADDRESS (ctx));
+    gum_arm64_writer_put_ldr_reg_address (aw, AArch64_REG_X16,
         GUM_ADDRESS (gum_sign_code_pointer (self->leave_thunk)));
-    gum_arm64_writer_put_br_reg (aw, ARM64_REG_X16);
+    gum_arm64_writer_put_br_reg (aw, AArch64_REG_X16);
 
     gum_arm64_writer_flush (aw);
     g_assert (gum_arm64_writer_offset (aw) <= ctx->trampoline_slice->size);
@@ -811,10 +811,10 @@ _gum_interceptor_backend_create_trampoline (GumInterceptorBackend * self,
 
     while ((insn = gum_arm64_relocator_peek_next_write_insn (ar)) != NULL)
     {
-      if (insn->id == ARM64_INS_MOV &&
-          insn->detail->arm64.operands[1].reg == ARM64_REG_LR)
+      if (insn->id == AArch64_INS_MOV &&
+          insn->detail->aarch64.operands[1].reg == AArch64_REG_LR)
       {
-        arm64_reg dst_reg = insn->detail->arm64.operands[0].reg;
+        aarch64_reg dst_reg = insn->detail->aarch64.operands[0].reg;
         const guint reg_size = sizeof (gpointer);
         const guint reg_pair_size = 2 * reg_size;
         guint dst_reg_index, dst_reg_slot_index, dst_reg_offset_in_frame;
@@ -823,17 +823,17 @@ _gum_interceptor_backend_create_trampoline (GumInterceptorBackend * self,
 
         gum_arm64_writer_put_call_address_with_arguments (aw,
             GUM_ADDRESS (_gum_interceptor_translate_top_return_address), 1,
-            GUM_ARG_REGISTER, ARM64_REG_LR);
+            GUM_ARG_REGISTER, AArch64_REG_LR);
 
-        if (dst_reg >= ARM64_REG_X0 && dst_reg <= ARM64_REG_X28)
+        if (dst_reg >= AArch64_REG_X0 && dst_reg <= AArch64_REG_X28)
         {
-          dst_reg_index = dst_reg - ARM64_REG_X0;
+          dst_reg_index = dst_reg - AArch64_REG_X0;
         }
         else
         {
-          g_assert (dst_reg >= ARM64_REG_X29 && dst_reg <= ARM64_REG_X30);
+          g_assert (dst_reg >= AArch64_REG_X29 && dst_reg <= AArch64_REG_X30);
 
-          dst_reg_index = dst_reg - ARM64_REG_X29;
+          dst_reg_index = dst_reg - AArch64_REG_X29;
         }
 
         dst_reg_slot_index = (dst_reg_index * reg_size) / reg_pair_size;
@@ -842,7 +842,7 @@ _gum_interceptor_backend_create_trampoline (GumInterceptorBackend * self,
         if (dst_reg_index % 2 != 0)
           dst_reg_offset_in_frame += reg_size;
 
-        gum_arm64_writer_put_str_reg_reg_offset (aw, ARM64_REG_X0, ARM64_REG_SP,
+        gum_arm64_writer_put_str_reg_reg_offset (aw, AArch64_REG_X0, AArch64_REG_SP,
             dst_reg_offset_in_frame);
 
         gum_arm64_writer_put_pop_all_x_registers (aw);
@@ -939,7 +939,7 @@ _gum_interceptor_backend_activate_trampoline (GumInterceptorBackend * self,
   {
     if (data->redirect_code_size == 8)
     {
-      gum_arm64_writer_put_push_reg_reg (aw, ARM64_REG_X0, ARM64_REG_LR);
+      gum_arm64_writer_put_push_reg_reg (aw, AArch64_REG_X0, AArch64_REG_LR);
       gum_arm64_writer_put_bl_imm (aw,
           GUM_ADDRESS (ctx->trampoline_deflector->trampoline));
     }
@@ -1058,19 +1058,19 @@ gum_emit_enter_thunk (GumArm64Writer * aw)
 {
   gum_emit_prolog (aw);
 
-  gum_arm64_writer_put_add_reg_reg_imm (aw, ARM64_REG_X1, ARM64_REG_SP,
+  gum_arm64_writer_put_add_reg_reg_imm (aw, AArch64_REG_X1, AArch64_REG_SP,
       GUM_FRAME_OFFSET_CPU_CONTEXT);
-  gum_arm64_writer_put_add_reg_reg_imm (aw, ARM64_REG_X2, ARM64_REG_SP,
+  gum_arm64_writer_put_add_reg_reg_imm (aw, AArch64_REG_X2, AArch64_REG_SP,
       GUM_FRAME_OFFSET_CPU_CONTEXT + G_STRUCT_OFFSET (GumCpuContext, lr));
-  gum_arm64_writer_put_add_reg_reg_imm (aw, ARM64_REG_X3, ARM64_REG_SP,
+  gum_arm64_writer_put_add_reg_reg_imm (aw, AArch64_REG_X3, AArch64_REG_SP,
       GUM_FRAME_OFFSET_NEXT_HOP);
 
   gum_arm64_writer_put_call_address_with_arguments (aw,
       GUM_ADDRESS (_gum_function_context_begin_invocation), 4,
-      GUM_ARG_REGISTER, ARM64_REG_X17,
-      GUM_ARG_REGISTER, ARM64_REG_X1,
-      GUM_ARG_REGISTER, ARM64_REG_X2,
-      GUM_ARG_REGISTER, ARM64_REG_X3);
+      GUM_ARG_REGISTER, AArch64_REG_X17,
+      GUM_ARG_REGISTER, AArch64_REG_X1,
+      GUM_ARG_REGISTER, AArch64_REG_X2,
+      GUM_ARG_REGISTER, AArch64_REG_X3);
 
   gum_emit_epilog (aw);
 }
@@ -1080,16 +1080,16 @@ gum_emit_leave_thunk (GumArm64Writer * aw)
 {
   gum_emit_prolog (aw);
 
-  gum_arm64_writer_put_add_reg_reg_imm (aw, ARM64_REG_X1, ARM64_REG_SP,
+  gum_arm64_writer_put_add_reg_reg_imm (aw, AArch64_REG_X1, AArch64_REG_SP,
       GUM_FRAME_OFFSET_CPU_CONTEXT);
-  gum_arm64_writer_put_add_reg_reg_imm (aw, ARM64_REG_X2, ARM64_REG_SP,
+  gum_arm64_writer_put_add_reg_reg_imm (aw, AArch64_REG_X2, AArch64_REG_SP,
       GUM_FRAME_OFFSET_NEXT_HOP);
 
   gum_arm64_writer_put_call_address_with_arguments (aw,
       GUM_ADDRESS (_gum_function_context_end_invocation), 3,
-      GUM_ARG_REGISTER, ARM64_REG_X17,
-      GUM_ARG_REGISTER, ARM64_REG_X1,
-      GUM_ARG_REGISTER, ARM64_REG_X2);
+      GUM_ARG_REGISTER, AArch64_REG_X17,
+      GUM_ARG_REGISTER, AArch64_REG_X1,
+      GUM_ARG_REGISTER, AArch64_REG_X2);
 
   gum_emit_epilog (aw);
 }
@@ -1107,33 +1107,33 @@ gum_emit_prolog (GumArm64Writer * aw)
    */
 
   /* Reserve space for next_hop */
-  gum_arm64_writer_put_sub_reg_reg_imm (aw, ARM64_REG_SP, ARM64_REG_SP, 16);
+  gum_arm64_writer_put_sub_reg_reg_imm (aw, AArch64_REG_SP, AArch64_REG_SP, 16);
 
   /* Store vector registers */
   for (i = 30; i != -2; i -= 2)
-    gum_arm64_writer_put_push_reg_reg (aw, ARM64_REG_Q0 + i, ARM64_REG_Q1 + i);
+    gum_arm64_writer_put_push_reg_reg (aw, AArch64_REG_Q0 + i, AArch64_REG_Q1 + i);
 
   /* Store X1-X28, FP, and LR */
-  gum_arm64_writer_put_push_reg_reg (aw, ARM64_REG_FP, ARM64_REG_LR);
+  gum_arm64_writer_put_push_reg_reg (aw, AArch64_REG_FP, AArch64_REG_LR);
   for (i = 27; i != -1; i -= 2)
-    gum_arm64_writer_put_push_reg_reg (aw, ARM64_REG_X0 + i, ARM64_REG_X1 + i);
+    gum_arm64_writer_put_push_reg_reg (aw, AArch64_REG_X0 + i, AArch64_REG_X1 + i);
 
   /* Store NZCV and X0 */
-  gum_arm64_writer_put_mov_reg_nzcv (aw, ARM64_REG_X1);
-  gum_arm64_writer_put_push_reg_reg (aw, ARM64_REG_X1, ARM64_REG_X0);
+  gum_arm64_writer_put_mov_reg_nzcv (aw, AArch64_REG_X1);
+  gum_arm64_writer_put_push_reg_reg (aw, AArch64_REG_X1, AArch64_REG_X0);
 
   /* PC placeholder and SP */
-  gum_arm64_writer_put_add_reg_reg_imm (aw, ARM64_REG_X0,
-      ARM64_REG_SP, sizeof (GumCpuContext) -
+  gum_arm64_writer_put_add_reg_reg_imm (aw, AArch64_REG_X0,
+      AArch64_REG_SP, sizeof (GumCpuContext) -
       G_STRUCT_OFFSET (GumCpuContext, nzcv) + 16);
-  gum_arm64_writer_put_push_reg_reg (aw, ARM64_REG_XZR, ARM64_REG_X0);
+  gum_arm64_writer_put_push_reg_reg (aw, AArch64_REG_XZR, AArch64_REG_X0);
 
   /* Frame pointer chain entry */
-  gum_arm64_writer_put_str_reg_reg_offset (aw, ARM64_REG_LR, ARM64_REG_SP,
+  gum_arm64_writer_put_str_reg_reg_offset (aw, AArch64_REG_LR, AArch64_REG_SP,
       sizeof (GumCpuContext) + 8);
-  gum_arm64_writer_put_str_reg_reg_offset (aw, ARM64_REG_FP, ARM64_REG_SP,
+  gum_arm64_writer_put_str_reg_reg_offset (aw, AArch64_REG_FP, AArch64_REG_SP,
       sizeof (GumCpuContext) + 0);
-  gum_arm64_writer_put_add_reg_reg_imm (aw, ARM64_REG_FP, ARM64_REG_SP,
+  gum_arm64_writer_put_add_reg_reg_imm (aw, AArch64_REG_FP, AArch64_REG_SP,
       sizeof (GumCpuContext));
 }
 
@@ -1143,25 +1143,25 @@ gum_emit_epilog (GumArm64Writer * aw)
   guint i;
 
   /* Skip PC and SP */
-  gum_arm64_writer_put_add_reg_reg_imm (aw, ARM64_REG_SP, ARM64_REG_SP, 16);
+  gum_arm64_writer_put_add_reg_reg_imm (aw, AArch64_REG_SP, AArch64_REG_SP, 16);
 
   /* Restore NZCV and X0 */
-  gum_arm64_writer_put_pop_reg_reg (aw, ARM64_REG_X1, ARM64_REG_X0);
-  gum_arm64_writer_put_mov_nzcv_reg (aw, ARM64_REG_X1);
+  gum_arm64_writer_put_pop_reg_reg (aw, AArch64_REG_X1, AArch64_REG_X0);
+  gum_arm64_writer_put_mov_nzcv_reg (aw, AArch64_REG_X1);
 
   /* Restore X1-X28, FP, and LR */
   for (i = 1; i != 29; i += 2)
-    gum_arm64_writer_put_pop_reg_reg (aw, ARM64_REG_X0 + i, ARM64_REG_X1 + i);
-  gum_arm64_writer_put_pop_reg_reg (aw, ARM64_REG_FP, ARM64_REG_LR);
+    gum_arm64_writer_put_pop_reg_reg (aw, AArch64_REG_X0 + i, AArch64_REG_X1 + i);
+  gum_arm64_writer_put_pop_reg_reg (aw, AArch64_REG_FP, AArch64_REG_LR);
 
   /* Restore vector registers */
   for (i = 0; i != 32; i += 2)
-    gum_arm64_writer_put_pop_reg_reg (aw, ARM64_REG_Q0 + i, ARM64_REG_Q1 + i);
+    gum_arm64_writer_put_pop_reg_reg (aw, AArch64_REG_Q0 + i, AArch64_REG_Q1 + i);
 
-  gum_arm64_writer_put_pop_reg_reg (aw, ARM64_REG_X16, ARM64_REG_X17);
+  gum_arm64_writer_put_pop_reg_reg (aw, AArch64_REG_X16, AArch64_REG_X17);
 #ifndef HAVE_PTRAUTH
-  gum_arm64_writer_put_ret_reg (aw, ARM64_REG_X16);
+  gum_arm64_writer_put_ret_reg (aw, AArch64_REG_X16);
 #else
-  gum_arm64_writer_put_br_reg (aw, ARM64_REG_X16);
+  gum_arm64_writer_put_br_reg (aw, AArch64_REG_X16);
 #endif
 }

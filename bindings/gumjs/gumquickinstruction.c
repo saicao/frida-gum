@@ -41,13 +41,13 @@ static JSValue gum_arm_parse_shift_details (JSContext * ctx,
     const cs_arm_op * op, GumQuickCore * core);
 static const gchar * gum_arm_shifter_to_string (arm_shifter type);
 #elif defined (HAVE_ARM64)
-static JSValue gum_arm64_parse_memory_operand_value (JSContext * ctx,
-    const arm64_op_mem * mem, csh cs, GumQuickCore * core);
-static JSValue gum_arm64_parse_shift_details (JSContext * ctx,
-    const cs_arm64_op * op, GumQuickCore * core);
-static const gchar * gum_arm64_shifter_to_string (arm64_shifter type);
-static const gchar * gum_arm64_extender_to_string (arm64_extender ext);
-static const gchar * gum_arm64_vas_to_string (arm64_vas vas);
+static JSValue gum_aarch64_parse_memory_operand_value (JSContext * ctx,
+    const aarch64_op_mem * mem, csh cs, GumQuickCore * core);
+static JSValue gum_aarch64_parse_shift_details (JSContext * ctx,
+    const cs_aarch64_op * op, GumQuickCore * core);
+static const gchar * gum_aarch64_shifter_to_string (aarch64_shifter type);
+static const gchar * gum_aarch64_extender_to_string (aarch64_extender ext);
+static const gchar * gum_aarch64_vas_to_string (AArch64Layout_VectorLayout vas);
 #elif defined (HAVE_MIPS)
 static JSValue gum_mips_parse_memory_operand_value (JSContext * ctx,
     const mips_op_mem * mem, csh cs, GumQuickCore * core);
@@ -778,14 +778,14 @@ gum_parse_operands (JSContext * ctx,
                     GumQuickCore * core)
 {
   JSValue result;
-  const cs_arm64 * arm64 = &insn->detail->arm64;
+  const cs_aarch64 * arm64 = &insn->detail->aarch64;
   uint8_t i;
 
   result = JS_NewArray (ctx);
 
   for (i = 0; i != arm64->op_count; i++)
   {
-    const cs_arm64_op * op = &arm64->operands[i];
+    const cs_aarch64_op * op = &arm64->operands[i];
     JSValue op_obj;
     const gchar * type;
     JSValue val;
@@ -794,52 +794,55 @@ gum_parse_operands (JSContext * ctx,
 
     switch (op->type)
     {
-      case ARM64_OP_REG:
+      case AArch64_OP_REG:
         type = "reg";
         val = JS_NewString (ctx, cs_reg_name (cs, op->reg));
         break;
-      case ARM64_OP_IMM:
+      case AArch64_OP_IMM:
         type = "imm";
         val = _gum_quick_int64_new (ctx, op->imm, core);
         break;
-      case ARM64_OP_MEM:
+      case AArch64_OP_MEM:
         type = "mem";
-        val = gum_arm64_parse_memory_operand_value (ctx, &op->mem, cs, core);
+        val = gum_aarch64_parse_memory_operand_value (ctx, &op->mem, cs, core);
         break;
-      case ARM64_OP_FP:
+      case AArch64_OP_FP:
         type = "fp";
         val = JS_NewFloat64 (ctx, op->fp);
         break;
-      case ARM64_OP_CIMM:
+      case AArch64_OP_CIMM:
         type = "cimm";
         val = _gum_quick_int64_new (ctx, op->imm, core);
         break;
-      case ARM64_OP_REG_MRS:
+      case AArch64_OP_REG_MRS:
         type = "reg-mrs";
         val = JS_NewString (ctx, cs_reg_name (cs, op->reg));
         break;
-      case ARM64_OP_REG_MSR:
+      case AArch64_OP_REG_MSR:
         type = "reg-msr";
         val = JS_NewString (ctx, cs_reg_name (cs, op->reg));
         break;
-      case ARM64_OP_PSTATE:
-        type = "pstate";
-        val = JS_NewInt32 (ctx, op->pstate);
-        break;
-      case ARM64_OP_SYS:
-        type = "sys";
-        val = JS_NewInt64 (ctx, op->sys);
-        break;
-      case ARM64_OP_PREFETCH:
-        type = "prefetch";
-        val = JS_NewInt32 (ctx, op->prefetch);
-        break;
-      case ARM64_OP_BARRIER:
-        type = "barrier";
-        val = JS_NewInt32 (ctx, op->barrier);
-        break;
+      
+      // case AArch64_OP_PSTATE:
+      //   type = "pstate";
+      //   val = JS_NewInt32 (ctx, op->pstate);
+      //   break;
+      // case AArch64_OP_SYS:
+      //   type = "sys";
+      //   val = JS_NewInt64 (ctx, op->sys);
+      //   break;
+      // case AArch64_OP_PREFETCH:
+      //   type = "prefetch";
+      //   val = JS_NewInt32 (ctx, op->prefetch);
+      //   break;
+      // case AArch64_OP_BARRIER:
+      //   type = "barrier";
+      //   val = JS_NewInt32 (ctx, op->barrier);
+      //   break;
       default:
-        g_assert_not_reached ();
+        type = "op_not_parse";
+        val = JS_NewInt32 (ctx, op->type);
+      // g_assert_not_reached ();
     }
 
     JS_DefinePropertyValue (ctx, op_obj,
@@ -850,25 +853,25 @@ gum_parse_operands (JSContext * ctx,
         GUM_QUICK_CORE_ATOM (core, value),
         val,
         JS_PROP_C_W_E);
-    if (op->shift.type != ARM64_SFT_INVALID)
+    if (op->shift.type != AArch64_SFT_INVALID)
     {
       JS_DefinePropertyValue (ctx, op_obj,
           GUM_QUICK_CORE_ATOM (core, shift),
-          gum_arm64_parse_shift_details (ctx, op, core),
+          gum_aarch64_parse_shift_details (ctx, op, core),
           JS_PROP_C_W_E);
     }
-    if (op->ext != ARM64_EXT_INVALID)
+    if (op->ext != AArch64_EXT_INVALID)
     {
       JS_DefinePropertyValue (ctx, op_obj,
           GUM_QUICK_CORE_ATOM (core, ext),
-          JS_NewString (ctx, gum_arm64_extender_to_string (op->ext)),
+          JS_NewString (ctx, gum_aarch64_extender_to_string (op->ext)),
           JS_PROP_C_W_E);
     }
-    if (op->vas != ARM64_VAS_INVALID)
+    if (op->vas != AArch64Layout_Invalid)
     {
       JS_DefinePropertyValue (ctx, op_obj,
           GUM_QUICK_CORE_ATOM (core, vas),
-          JS_NewString (ctx, gum_arm64_vas_to_string (op->vas)),
+          JS_NewString (ctx, gum_aarch64_vas_to_string (op->vas)),
           JS_PROP_C_W_E);
     }
     if (op->vector_index != -1)
@@ -890,21 +893,21 @@ gum_parse_operands (JSContext * ctx,
 }
 
 static JSValue
-gum_arm64_parse_memory_operand_value (JSContext * ctx,
-                                      const arm64_op_mem * mem,
+gum_aarch64_parse_memory_operand_value (JSContext * ctx,
+                                      const aarch64_op_mem * mem,
                                       csh cs,
                                       GumQuickCore * core)
 {
   JSValue val = JS_NewObject (ctx);
 
-  if (mem->base != ARM64_REG_INVALID)
+  if (mem->base != AArch64_REG_INVALID)
   {
     JS_DefinePropertyValue (ctx, val,
         GUM_QUICK_CORE_ATOM (core, base),
         JS_NewString (ctx, cs_reg_name (cs, mem->base)),
         JS_PROP_C_W_E);
   }
-  if (mem->index != ARM64_REG_INVALID)
+  if (mem->index != AArch64_REG_INVALID)
   {
     JS_DefinePropertyValue (ctx, val,
         GUM_QUICK_CORE_ATOM (core, index),
@@ -920,15 +923,15 @@ gum_arm64_parse_memory_operand_value (JSContext * ctx,
 }
 
 static JSValue
-gum_arm64_parse_shift_details (JSContext * ctx,
-                               const cs_arm64_op * op,
+gum_aarch64_parse_shift_details (JSContext * ctx,
+                               const cs_aarch64_op * op,
                                GumQuickCore * core)
 {
   JSValue shift = JS_NewObject (ctx);
 
   JS_DefinePropertyValue (ctx, shift,
       GUM_QUICK_CORE_ATOM (core, type),
-      JS_NewString (ctx, gum_arm64_shifter_to_string (op->shift.type)),
+      JS_NewString (ctx, gum_aarch64_shifter_to_string (op->shift.type)),
       JS_PROP_C_W_E);
   JS_DefinePropertyValue (ctx, shift,
       GUM_QUICK_CORE_ATOM (core, value),
@@ -939,15 +942,15 @@ gum_arm64_parse_shift_details (JSContext * ctx,
 }
 
 static const gchar *
-gum_arm64_shifter_to_string (arm64_shifter type)
+gum_aarch64_shifter_to_string (aarch64_shifter type)
 {
   switch (type)
   {
-    case ARM64_SFT_LSL: return "lsl";
-    case ARM64_SFT_MSL: return "msl";
-    case ARM64_SFT_LSR: return "lsr";
-    case ARM64_SFT_ASR: return "asr";
-    case ARM64_SFT_ROR: return "ror";
+    case AArch64_SFT_LSL: return "lsl";
+    case AArch64_SFT_MSL: return "msl";
+    case AArch64_SFT_LSR: return "lsr";
+    case AArch64_SFT_ASR: return "asr";
+    case AArch64_SFT_ROR: return "ror";
     default:
       g_assert_not_reached ();
   }
@@ -956,18 +959,18 @@ gum_arm64_shifter_to_string (arm64_shifter type)
 }
 
 static const gchar *
-gum_arm64_extender_to_string (arm64_extender ext)
+gum_aarch64_extender_to_string (aarch64_extender ext)
 {
   switch (ext)
   {
-    case ARM64_EXT_UXTB: return "uxtb";
-    case ARM64_EXT_UXTH: return "uxth";
-    case ARM64_EXT_UXTW: return "uxtw";
-    case ARM64_EXT_UXTX: return "uxtx";
-    case ARM64_EXT_SXTB: return "sxtb";
-    case ARM64_EXT_SXTH: return "sxth";
-    case ARM64_EXT_SXTW: return "sxtw";
-    case ARM64_EXT_SXTX: return "sxtx";
+    case AArch64_EXT_UXTB: return "uxtb";
+    case AArch64_EXT_UXTH: return "uxth";
+    case AArch64_EXT_UXTW: return "uxtw";
+    case AArch64_EXT_UXTX: return "uxtx";
+    case AArch64_EXT_SXTB: return "sxtb";
+    case AArch64_EXT_SXTH: return "sxth";
+    case AArch64_EXT_SXTW: return "sxtw";
+    case AArch64_EXT_SXTX: return "sxtx";
     default:
       g_assert_not_reached ();
   }
@@ -976,19 +979,19 @@ gum_arm64_extender_to_string (arm64_extender ext)
 }
 
 static const gchar *
-gum_arm64_vas_to_string (arm64_vas vas)
+gum_aarch64_vas_to_string (AArch64Layout_VectorLayout vas)
 {
   switch (vas)
   {
-    case ARM64_VAS_8B:  return "8b";
-    case ARM64_VAS_16B: return "16b";
-    case ARM64_VAS_4H:  return "4h";
-    case ARM64_VAS_8H:  return "8h";
-    case ARM64_VAS_2S:  return "2s";
-    case ARM64_VAS_4S:  return "4s";
-    case ARM64_VAS_1D:  return "1d";
-    case ARM64_VAS_2D:  return "2d";
-    case ARM64_VAS_1Q:  return "1q";
+    case AArch64Layout_VL_8B:  return "8b";
+    case AArch64Layout_VL_16B: return "16b";
+    case AArch64Layout_VL_4H:  return "4h";
+    case AArch64Layout_VL_8H:  return "8h";
+    case AArch64Layout_VL_2S:  return "2s";
+    case AArch64Layout_VL_4S:  return "4s";
+    case AArch64Layout_VL_1D:  return "1d";
+    case AArch64Layout_VL_2D:  return "2d";
+    case AArch64Layout_VL_1Q:  return "1q";
     default:
       g_assert_not_reached ();
   }

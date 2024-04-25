@@ -288,7 +288,7 @@ gum_symbol_cache_invalidator_init (GumSymbolCacheInvalidator * self)
 #elif defined (HAVE_ARM64)
     first_instruction =
         gum_arm64_reader_disassemble_instruction_at (notification_impl);
-    if (first_instruction != NULL && first_instruction->id == ARM64_INS_BRK)
+    if (first_instruction != NULL && first_instruction->id == AArch64_INS_BRK)
       offset = first_instruction->size;
 #endif
 

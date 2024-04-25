@@ -51,12 +51,12 @@ static Local<Object> gum_arm_parse_shift_details (const cs_arm_op * op,
 static const gchar * gum_arm_shifter_to_string (arm_shifter type);
 #elif defined (HAVE_ARM64)
 static Local<Object> gum_arm64_parse_memory_operand_value (
-    const arm64_op_mem * mem, GumV8Instruction * module);
-static Local<Object> gum_arm64_parse_shift_details (const cs_arm64_op * op,
+    const aarch64_op_mem * mem, GumV8Instruction * module);
+static Local<Object> gum_arm64_parse_shift_details (const cs_aarch64_op * op,
     GumV8Instruction * module);
-static const gchar * gum_arm64_shifter_to_string (arm64_shifter type);
-static const gchar * gum_arm64_extender_to_string (arm64_extender ext);
-static const gchar * gum_arm64_vas_to_string (arm64_vas vas);
+static const gchar * gum_arm64_shifter_to_string (aarch64_shifter type);
+static const gchar * gum_arm64_extender_to_string (aarch64_extender ext);
+static const gchar * gum_arm64_vas_to_string (AArch64Layout_VectorLayout vas);
 #elif defined (HAVE_MIPS)
 static Local<Object> gum_mips_parse_memory_operand_value (
     const mips_op_mem * mem, GumV8Instruction * module);
@@ -714,7 +714,7 @@ gum_parse_operands (const cs_insn * insn,
   auto isolate = core->isolate;
   auto context = isolate->GetCurrentContext ();
   auto capstone = module->capstone;
-  auto arm64 = &insn->detail->arm64;
+  auto arm64 = &insn->detail->aarch64;
 
   uint8_t op_count = arm64->op_count;
 
@@ -722,7 +722,7 @@ gum_parse_operands (const cs_insn * insn,
 
   for (uint8_t op_index = 0; op_index != op_count; op_index++)
   {
-    const cs_arm64_op * op = &arm64->operands[op_index];
+    const cs_aarch64_op * op = &arm64->operands[op_index];
 
     auto element = Object::New (isolate);
 
@@ -731,74 +731,77 @@ gum_parse_operands (const cs_insn * insn,
 
     switch (op->type)
     {
-      case ARM64_OP_REG:
+      case AArch64_OP_REG:
         _gum_v8_object_set_ascii (element, type_key, "reg", core);
         _gum_v8_object_set_ascii (element, value_key,
             cs_reg_name (capstone, op->reg), core);
         break;
-      case ARM64_OP_IMM:
+      case AArch64_OP_IMM:
         _gum_v8_object_set_ascii (element, type_key, "imm", core);
         _gum_v8_object_set (element, value_key,
             _gum_v8_int64_new (op->imm, core), core);
         break;
-      case ARM64_OP_MEM:
+      case AArch64_OP_MEM:
         _gum_v8_object_set_ascii (element, type_key, "mem", core);
         _gum_v8_object_set (element, value_key,
             gum_arm64_parse_memory_operand_value (&op->mem, module), core);
         break;
-      case ARM64_OP_FP:
+      case AArch64_OP_FP:
         _gum_v8_object_set_ascii (element, type_key, "fp", core);
         _gum_v8_object_set (element, value_key, Number::New (isolate, op->fp),
             core);
         break;
-      case ARM64_OP_CIMM:
+      case AArch64_OP_CIMM:
         _gum_v8_object_set_ascii (element, type_key, "cimm", core);
         _gum_v8_object_set (element, value_key,
             _gum_v8_int64_new (op->imm, core), core);
         break;
-      case ARM64_OP_REG_MRS:
+      case AArch64_OP_REG_MRS:
         _gum_v8_object_set_ascii (element, type_key, "reg-mrs", core);
         _gum_v8_object_set_ascii (element, value_key,
             cs_reg_name (capstone, op->reg), core);
         break;
-      case ARM64_OP_REG_MSR:
+      case AArch64_OP_REG_MSR:
         _gum_v8_object_set_ascii (element, type_key, "reg-msr", core);
         _gum_v8_object_set_ascii (element, value_key,
             cs_reg_name (capstone, op->reg), core);
         break;
-      case ARM64_OP_PSTATE:
-        _gum_v8_object_set_ascii (element, type_key, "pstate", core);
-        _gum_v8_object_set_uint (element, value_key, op->pstate, core);
-        break;
-      case ARM64_OP_SYS:
-        _gum_v8_object_set_ascii (element, type_key, "sys", core);
-        _gum_v8_object_set_uint (element, value_key, op->sys, core);
-        break;
-      case ARM64_OP_PREFETCH:
-        _gum_v8_object_set_ascii (element, type_key, "prefetch", core);
-        _gum_v8_object_set_uint (element, value_key, op->prefetch, core);
-        break;
-      case ARM64_OP_BARRIER:
-        _gum_v8_object_set_ascii (element, type_key, "barrier", core);
-        _gum_v8_object_set_uint (element, value_key, op->barrier, core);
-        break;
+      // case AArch64_OP_PSTATE:
+      //   _gum_v8_object_set_ascii (element, type_key, "pstate", core);
+      //   _gum_v8_object_set_uint (element, value_key, op->pstate, core);
+      //   break;
+      // case AArch64_OP_SYS:
+      //   _gum_v8_object_set_ascii (element, type_key, "sys", core);
+      //   _gum_v8_object_set_uint (element, value_key, op->sys, core);
+      //   break;
+      // case AArch64_OP_PREFETCH:
+      //   _gum_v8_object_set_ascii (element, type_key, "prefetch", core);
+      //   _gum_v8_object_set_uint (element, value_key, op->prefetch, core);
+      //   break;
+      // case AArch64_OP_BARRIER:
+      //   _gum_v8_object_set_ascii (element, type_key, "barrier", core);
+      //   _gum_v8_object_set_uint (element, value_key, op->barrier, core);
+      //   break;
+
       default:
-        g_assert_not_reached ();
+        _gum_v8_object_set_ascii (element, type_key, "not_parse", core);
+        _gum_v8_object_set_uint (element, value_key, op->sysop.alias.raw_val, core);
+        // g_assert_not_reached ();
     }
 
-    if (op->shift.type != ARM64_SFT_INVALID)
+    if (op->shift.type != AArch64_SFT_INVALID)
     {
       _gum_v8_object_set (element, "shift",
           gum_arm64_parse_shift_details (op, module), core);
     }
 
-    if (op->ext != ARM64_EXT_INVALID)
+    if (op->ext != AArch64_EXT_INVALID)
     {
       _gum_v8_object_set_ascii (element, "ext",
           gum_arm64_extender_to_string (op->ext), core);
     }
 
-    if (op->vas != ARM64_VAS_INVALID)
+    if (op->vas != AArch64Layout_Invalid)
     {
       _gum_v8_object_set_ascii (element, "vas",
           gum_arm64_vas_to_string (op->vas), core);
@@ -819,7 +822,7 @@ gum_parse_operands (const cs_insn * insn,
 }
 
 static Local<Object>
-gum_arm64_parse_memory_operand_value (const arm64_op_mem * mem,
+gum_arm64_parse_memory_operand_value (const aarch64_op_mem * mem,
                                       GumV8Instruction * module)
 {
   auto core = module->core;
@@ -827,13 +830,13 @@ gum_arm64_parse_memory_operand_value (const arm64_op_mem * mem,
 
   auto result = Object::New (core->isolate);
 
-  if (mem->base != ARM64_REG_INVALID)
+  if (mem->base != AArch64_REG_INVALID)
   {
     _gum_v8_object_set_ascii (result, "base",
         cs_reg_name (capstone, mem->base), core);
   }
 
-  if (mem->index != ARM64_REG_INVALID)
+  if (mem->index != AArch64_REG_INVALID)
   {
     _gum_v8_object_set_ascii (result, "index",
         cs_reg_name (capstone, mem->index), core);
@@ -845,7 +848,7 @@ gum_arm64_parse_memory_operand_value (const arm64_op_mem * mem,
 }
 
 static Local<Object>
-gum_arm64_parse_shift_details (const cs_arm64_op * op,
+gum_arm64_parse_shift_details (const cs_aarch64_op * op,
                                GumV8Instruction * module)
 {
   auto core = module->core;
@@ -861,15 +864,15 @@ gum_arm64_parse_shift_details (const cs_arm64_op * op,
 }
 
 static const gchar *
-gum_arm64_shifter_to_string (arm64_shifter type)
+gum_arm64_shifter_to_string (aarch64_shifter type)
 {
   switch (type)
   {
-    case ARM64_SFT_LSL: return "lsl";
-    case ARM64_SFT_MSL: return "msl";
-    case ARM64_SFT_LSR: return "lsr";
-    case ARM64_SFT_ASR: return "asr";
-    case ARM64_SFT_ROR: return "ror";
+    case AArch64_SFT_LSL: return "lsl";
+    case AArch64_SFT_MSL: return "msl";
+    case AArch64_SFT_LSR: return "lsr";
+    case AArch64_SFT_ASR: return "asr";
+    case AArch64_SFT_ROR: return "ror";
     default:
       g_assert_not_reached ();
   }
@@ -878,18 +881,18 @@ gum_arm64_shifter_to_string (arm64_shifter type)
 }
 
 static const gchar *
-gum_arm64_extender_to_string (arm64_extender ext)
+gum_arm64_extender_to_string (aarch64_extender ext)
 {
   switch (ext)
   {
-    case ARM64_EXT_UXTB: return "uxtb";
-    case ARM64_EXT_UXTH: return "uxth";
-    case ARM64_EXT_UXTW: return "uxtw";
-    case ARM64_EXT_UXTX: return "uxtx";
-    case ARM64_EXT_SXTB: return "sxtb";
-    case ARM64_EXT_SXTH: return "sxth";
-    case ARM64_EXT_SXTW: return "sxtw";
-    case ARM64_EXT_SXTX: return "sxtx";
+    case AArch64_EXT_UXTB: return "uxtb";
+    case AArch64_EXT_UXTH: return "uxth";
+    case AArch64_EXT_UXTW: return "uxtw";
+    case AArch64_EXT_UXTX: return "uxtx";
+    case AArch64_EXT_SXTB: return "sxtb";
+    case AArch64_EXT_SXTH: return "sxth";
+    case AArch64_EXT_SXTW: return "sxtw";
+    case AArch64_EXT_SXTX: return "sxtx";
     default:
       g_assert_not_reached ();
   }
@@ -898,19 +901,19 @@ gum_arm64_extender_to_string (arm64_extender ext)
 }
 
 static const gchar *
-gum_arm64_vas_to_string (arm64_vas vas)
+gum_arm64_vas_to_string (AArch64Layout_VectorLayout vas)
 {
   switch (vas)
   {
-    case ARM64_VAS_8B:  return "8b";
-    case ARM64_VAS_16B: return "16b";
-    case ARM64_VAS_4H:  return "4h";
-    case ARM64_VAS_8H:  return "8h";
-    case ARM64_VAS_2S:  return "2s";
-    case ARM64_VAS_4S:  return "4s";
-    case ARM64_VAS_1D:  return "1d";
-    case ARM64_VAS_2D:  return "2d";
-    case ARM64_VAS_1Q:  return "1q";
+    case AArch64Layout_VL_8B:  return "8b";
+    case AArch64Layout_VL_16B: return "16b";
+    case AArch64Layout_VL_4H:  return "4h";
+    case AArch64Layout_VL_8H:  return "8h";
+    case AArch64Layout_VL_2S:  return "2s";
+    case AArch64Layout_VL_4S:  return "4s";
+    case AArch64Layout_VL_1D:  return "1d";
+    case AArch64Layout_VL_2D:  return "2d";
+    case AArch64Layout_VL_1Q:  return "1q";
     default:
       g_assert_not_reached ();
   }
