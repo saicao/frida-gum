@@ -1,6 +1,6 @@
 [wrap-git]
-url = https://github.com/frida/capstone.git
-revision = main
+url = https://github.com/saicao/capstone.git
+revision = v6
 depth = 1
 
 [provide]

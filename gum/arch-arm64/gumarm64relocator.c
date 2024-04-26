@@ -8,6 +8,7 @@
 
 #include "gumarm64relocator.h"
 
+#include "capstone.h"
 #include "gummemory.h"
 
 #define GUM_MAX_INPUT_INSN_COUNT (100)
@@ -667,6 +668,7 @@ gum_arm64_relocator_rewrite_adr (GumArm64Relocator * self,
   const cs_aarch64_op * label = &ctx->detail->operands[1];
 
   g_assert (label->type == AArch64_OP_IMM);
+  printf("%llx, addr %s %llx \n",ctx->insn->address , cs_reg_name(self->capstone,dst->reg),label->imm);
 
   gum_arm64_writer_put_ldr_reg_address (ctx->output, dst->reg, label->imm);
   return TRUE;

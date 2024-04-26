@@ -60,6 +60,7 @@ enum _GumArm64IndexMode
   GUM_INDEX_PRE_ADJUST    = 3,
 };
 
+
 GUM_API GumArm64Writer * gum_arm64_writer_new (gpointer code_address);
 GUM_API GumArm64Writer * gum_arm64_writer_ref (GumArm64Writer * writer);
 GUM_API void gum_arm64_writer_unref (GumArm64Writer * writer);

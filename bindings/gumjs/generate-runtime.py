@@ -227,7 +227,10 @@ def generate_runtime_cmodule(output_dir, output, arch, input_dir, gum_dir, capst
         writer_arch = "mips"
     else:
         writer_arch = arch
-    capstone_arch = writer_arch
+    if(arch=='arm64'):
+        capstone_arch='aarch64'
+    else:
+        capstone_arch = writer_arch
 
     def gum_header_matches_writer(name):
         if writer_arch == "arm":
@@ -239,11 +242,12 @@ def generate_runtime_cmodule(output_dir, output, arch, input_dir, gum_dir, capst
         return source.replace("GUM_API ", "")
 
     def capstone_header_matches_arch(name):
-        if name in ("capstone.h", "platform.h"):
+        if name in ("capstone.h", "platform.h","cs_operand.h"):
             return True
         return name == capstone_arch + ".h"
 
     def optimize_capstone_header(source):
+       
         result = capstone_include_pattern.sub(transform_capstone_include, source)
         result = capstone_export_pattern.sub("", result)
         result = result.replace("CAPSTONE_API ", "")
@@ -252,9 +256,8 @@ def generate_runtime_cmodule(output_dir, output, arch, input_dir, gum_dir, capst
     def transform_capstone_include(m):
         name = m.group(1)
 
-        if name in ("platform", capstone_arch):
+        if name in ("platform","cs_operand", capstone_arch):
             return m.group(0)
-
         if name == "systemz":
             name = "sysz"
 
@@ -284,12 +287,19 @@ def generate_runtime_cmodule(output_dir, output, arch, input_dir, gum_dir, capst
                 input_identifier = "gum_cmodule_{0}".format(identifier(header_name))
 
                 for pattern in (cmodule_function_pattern, cmodule_variable_pattern):
+                    
                     for m in pattern.finditer(header_source):
                         name = m.group(2)
                         if name.startswith("cs_arch_register_"):
                             continue
                         symbols.append(name)
+                
+                
+                source_path=Path(output_dir /"opt_source"/header_name)
+                source_path.parents[0].mkdir(parents=True,exist_ok=True)
 
+                with (source_path).open('w', encoding='utf-8') as source_file:
+                    source_file.write(header_source)
                 source_bytes = bytearray(header_source.encode('utf-8'))
                 source_bytes.append(0)
                 source_size = len(source_bytes)

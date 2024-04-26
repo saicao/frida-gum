@@ -1,6 +1,8 @@
+
+#line 2 
 #include "json-glib/json-glib.h"
 #include <gum/gummodulemap.h>
-#include <gum/gumstalker.h>
+#include "gum/gumstalker.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -58,13 +60,28 @@ static void emit_scratch_register_restore(GumArm64Writer *cw, aarch64_reg reg);
 static cs_err atomic_regs_access(const cs_insn *insn, cs_regs regs_read,
                                  uint8_t *regs_read_count, cs_regs regs_write,
                                  uint8_t *regs_write_count);
+
 static void js_log(const char *format, ...);
+
+static void dump_insts(csh cap,guint8 * strat,gsize size);
+
+void dump_insts(csh cap,guint8 * strat,gsize size){
+    cs_insn * insn;
+    printf("======dump inst base:%p size:%lu=======\n",strat,size);
+    gsize count=cs_disasm(cap ,strat, size, (guint64)strat, 0, &insn);
+    for(gsize i=0;i<count;i++){
+      printf("%llx:%s %s\n",insn[i].address,insn[i].mnemonic,insn[i].op_str);
+    }
+    cs_free( insn, count);
+    printf("======dump inst end=======\n");
+}
 // 如果所有的都正确的话，我们不需要这些。
 // javascript 只支持 48bit
 extern void js_on_block_exec(gpointer ctx, guint32 ctx_size, gpointer buf,
                              guint32 buf_size);
 static void on_block_exec(GumCpuContext *cpu_context, gpointer user_data);
 static void on_block_exec(GumCpuContext *cpu_context, gpointer user_data) {
+  printf("pending size%llu\n",session.pending_size);
   js_on_block_exec(cpu_context, sizeof(GumCpuContext), session.log_buf,
                    session.pending_size);
 };
@@ -93,27 +110,11 @@ cs_err regs_access(csh ud, const cs_insn *insn, cs_regs regs_read,
     return CS_ERR_OK;
   }
   // check and decode atomic
-  err = atomic_regs_access(insn, regs_read, regs_read_count, regs_write,
-                           regs_write_count);
-  if (err == CS_ERR_OK) {
-    return CS_ERR_OK;
-  }
-  //读编码表读烦了，这样写了
-//   switch (insn.id) {
-//     case AArch64_INS_CAS:
-//     case AArch64_INS_CASA:
-//     case AArch64_INS_CASAL:
-//     case AArch64_INS_CASL:
-//     regs_write[0]=insn.opreand[0]
-//     regs_write[1]=insn.opreand[2]
-//     *regs_write_count=2;
-//     regs_read[1]=opreand[1]
-//     *regs_read_count=1;
-//     return;
-//     break;
+//   err = atomic_regs_access(insn, regs_read, regs_read_count, regs_write,
+//                            regs_write_count);
+//   if (err == CS_ERR_OK) {
+//     return CS_ERR_OK;
 //   }
-
-
   err = cs_regs_access(ud, insn, regs_read, regs_read_count, regs_write,
                        regs_write_count);
 
@@ -137,7 +138,7 @@ void transform(GumStalkerIterator *iterator, GumStalkerOutput *output,
 
   gboolean is_last_in_block = false;
   while (gum_stalker_iterator_next(iterator, &insn)) {
-
+    
     num_instructions++;
     gboolean is_first_in_block = num_instructions == 1;
     is_last_in_block = cs_insn_group(capstone, insn, CS_GRP_JUMP) ||
@@ -154,6 +155,8 @@ void transform(GumStalkerIterator *iterator, GumStalkerOutput *output,
       if (gum_stalker_iterator_get_memory_access(iterator) ==
           GUM_MEMORY_ACCESS_OPEN) {
         gum_stalker_iterator_put_callout(iterator, on_block_exec, NULL, NULL);
+      }else{
+        printf("memory close \n");
       }
       block_address = insn->address;
 
@@ -193,11 +196,9 @@ void transform(GumStalkerIterator *iterator, GumStalkerOutput *output,
       emit_scratch_register_restore(cw, prev_session_reg);
 
     if (is_first_in_block) {
-
       gum_arm64_writer_put_str_reg_reg_offset(
           cw, AArch64_REG_LR, session_reg,
           G_STRUCT_OFFSET(ITraceSession, log_buf) + 8);
-      // add_block_write_meta (meta, insn->address - block_address, 33);
     }
     if (is_last_in_block) {
       gum_arm64_writer_put_stp_reg_reg_reg_offset(
@@ -216,23 +217,6 @@ void transform(GumStalkerIterator *iterator, GumStalkerOutput *output,
       gum_arm64_writer_put_str_reg_reg_offset(
           cw, AArch64_REG_X27, session_reg,
           G_STRUCT_OFFSET(ITraceSession, pending_size));
-      // gum_stalker_iterator_put_callout(iterator,);
-      // if (session.write_impl == 0 ||
-      //     !gum_arm64_writer_can_branch_directly_between (cw, cw->pc,
-      //     session.write_impl))
-      // {
-      //   gconstpointer after_write_impl = cw->code + 1;
-      //   panic("%s\n","backpatch write_impl");
-      //   gum_arm64_writer_put_b_label (cw, after_write_impl);
-
-      //   session.write_impl = cw->pc;
-      //   emit_buffer_write_impl (cw);
-
-      //   gum_arm64_writer_put_label (cw, after_write_impl);
-      // }
-      // 返回javascript 引擎，这会很慢很慢，没有buffer缓冲，但是实现简单；
-      // gum_arm64_writer_put_bl_imm (cw, session.write_impl);
-      // restore regs
       gum_arm64_writer_put_ldp_reg_reg_reg_offset(
           cw, AArch64_REG_X27, AArch64_REG_LR, session_reg,
           G_STRUCT_OFFSET(ITraceSession, saved_regs), GUM_INDEX_SIGNED_OFFSET);
@@ -398,42 +382,14 @@ void transform(GumStalkerIterator *iterator, GumStalkerOutput *output,
 
   gchar *json = make_json(&meta);
 
+  
   on_compile(json);
- 
-
-  if (!is_last_in_block) {
-    aarch64_reg session_reg=SCRATCH_REG_TOP;
-    //reg_header
-    gum_arm64_writer_put_ldr_reg_address(cw, session_reg,
-                                             GUM_ADDRESS(&session));
-    gum_arm64_writer_put_stp_reg_reg_reg_offset(
-    cw, AArch64_REG_X27, AArch64_REG_LR, session_reg,
-    G_STRUCT_OFFSET(ITraceSession, saved_regs), GUM_INDEX_SIGNED_OFFSET);
-      // 我们知道offset 在runtime之前，但是要保存此值 mov
-      // log_buf_offset，将block信息写入指令中。
-      gum_arm64_writer_put_ldr_reg_u64(cw, AArch64_REG_X27, block_address);
-      gum_arm64_writer_put_str_reg_reg_offset(
-          cw, AArch64_REG_X27, session_reg,
-          G_STRUCT_OFFSET(ITraceSession, log_buf));
-      // 我们知道offset 在runtime之前，但是要保存此值 mov
-      // log_buf_offset，将block信息写入指令中。
-      gum_arm64_writer_put_ldr_reg_u64(cw, AArch64_REG_X27, log_buf_offset);
-
-      gum_arm64_writer_put_str_reg_reg_offset(
-          cw, AArch64_REG_X27, session_reg,
-          G_STRUCT_OFFSET(ITraceSession, pending_size));
-      gum_arm64_writer_put_ldp_reg_reg_reg_offset(
-          cw, AArch64_REG_X27, AArch64_REG_LR, session_reg,
-          G_STRUCT_OFFSET(ITraceSession, saved_regs), GUM_INDEX_SIGNED_OFFSET);
-      emit_scratch_register_restore(cw, session_reg);
-    
-    // printf("\n%s\n",json);
-    
-    // printf("\n next address %llx %s %s\n",insn->address,insn->mnemonic,insn->op_str);
-    
-    //ABORT();
-  };
-   g_free(json);
+  guint64 compiled_code_size=gum_arm64_writer_offset(cw);
+  guint64 compile_start=(guint64)cw->base;
+  printf("%llx %llu\n",compile_start,compiled_code_size);
+  dump_insts(capstone, (void*)compile_start, compiled_code_size);
+  ABORT();
+  g_free(json);
 }
 
 static void on_first_block_hit(GumCpuContext *cpu_context, gpointer user_data) {

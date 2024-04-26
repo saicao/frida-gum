@@ -789,33 +789,45 @@ void gum_stalker_get_system_regs (Arm64SystemRegs * regs)
 #ifdef HAVE_LINUX
 static GumInterceptor * gum_exec_ctx_interceptor = NULL;
 #endif
-static void gum_dump_exec_block(GumExecCtx * ctx);
-static void gum_dump_exec_block(GumExecCtx * ctx)
+static void gum_dump_exec_block(csh capstone,GumExecBlock * block);
+static void gum_dump_exec_block(csh capstone,GumExecBlock * block)
 {
   
-  if(ctx->current_block==NULL){
-    return;
+  
+  g_debug("-------------%p=>%p-----------",block->real_start,block->code_start);
+  gsize size;
+  guint8 * code;
+  gsize count;
+  code=block->real_start;
+  size=block->real_size;
+  
+  cs_insn * insn;
+  count=cs_disasm(capstone ,code, size, code, 0, &insn);
+  for(gsize i=0;i<count;i++){
+    g_debug("%llx:%s %s",insn[i].address,insn[i].mnemonic,insn[i].op_str);
   }
-  g_debug("%p=>%p",ctx->current_block->real_start,ctx->current_block->code_start);
+  cs_free( insn, count);
+
+  // g_debug("---------------------------");
+  // code=block->code_slab->slab.data;
+  // size=block->code_slab->slab.size;
+  // guint64 offset = block->code_slab->slab.offset;
+  // count=cs_disasm(capstone ,code, size,offset , 0, &insn);
+  // for(gsize i=0;i<count;i++){
+  //   g_debug("%llx:%s %s",insn[i].address,insn[i].mnemonic,insn[i].op_str);
+  // }
+  // cs_free( insn, count);
+  
   // csh cap=ctx->relocator.capstone;
-  // gsize size;
-  // guint8 * code;
-  // code=ctx->current_block->real_start;
-  // size=ctx->current_block->real_size;
+  
  
-  // cs_insn * insn;
+  //
   // gsize count=0;
   // g_debug("========dump trans=====");
   
   // // code=ctx->current_block->code_slab;
   // // size=ctx->current_block->;
-  // g_debug("code size:%lu",size);
-  // count=cs_disasm(cap ,code, size, code, 0, &insn);
-  // for(gsize i=0;i<count;i++){
-  //   g_debug("%llx:%s %s",insn[i].address,insn[i].mnemonic,insn[i].op_str);
-  // }
-  // cs_free( insn, count);
-  // g_debug("------------------");
+  
   // code=ctx->current_block->code_start;
   // size=ctx->current_block->code_size;
   // count=cs_disasm(cap ,code, size, code, 0, &insn);
@@ -2523,7 +2535,6 @@ gum_exec_ctx_switch_block (GumExecCtx * ctx,
    */
   gum_exec_ctx_query_block_switch_callback (ctx, block, start_address,
       from_insn, &ctx->resume_at);
-  // gum_dump_exec_block(ctx);
   return ctx->resume_at;
   
 }
@@ -2568,6 +2579,7 @@ gum_exec_ctx_recompile_and_switch_block (GumExecCtx * ctx,
 
   gum_exec_ctx_maybe_unfollow (ctx, start_address);
 }
+
 
 static GumExecBlock *
 gum_exec_ctx_obtain_block_for (GumExecCtx * ctx,
@@ -2620,8 +2632,13 @@ gum_exec_ctx_obtain_block_for (GumExecCtx * ctx,
   }
 
   *code_address = block->code_start;
-  g_debug("gum_exec_ctx_obtain_block_for  %p \n",*code_address);
-  gum_dump_exec_block(ctx);
+  
+  
+  
+  
+  // g_abort();
+
+  gum_dump_exec_block(ctx->relocator.capstone,block);
   return block;
 }
 
@@ -2767,7 +2784,7 @@ gum_exec_ctx_compile_block (GumExecCtx * ctx,
                             guint * output_size,
                             guint * slow_size)
 {
-  g_debug("gum_exec_ctx_compile_block ");
+  
   GumArm64Writer * cw = &ctx->code_writer;
   GumArm64Writer * cws = &ctx->slow_writer;
   GumArm64Relocator * rl = &ctx->relocator;
@@ -2837,7 +2854,7 @@ gum_exec_ctx_compile_block (GumExecCtx * ctx,
   *input_size = rl->input_cur - rl->input_start;
   *output_size = gum_arm64_writer_offset (cw);
   *slow_size = gum_arm64_writer_offset (cws);
-  g_debug("gum_exec_ctx_compile_block done");
+  g_debug("gum_exec_ctx_compile_block %p\n",block->real_start);
 }
 
 static void
@@ -3175,6 +3192,7 @@ gum_exec_ctx_write_prolog (GumExecCtx * ctx,
       AArch64_REG_LR, AArch64_REG_SP, -(16 + GUM_RED_ZONE_SIZE),
       GUM_INDEX_PRE_ADJUST);
   gum_arm64_writer_put_bl_imm (cw, GUM_ADDRESS (helper));
+
 }
 
 static void
@@ -3192,6 +3210,7 @@ gum_exec_ctx_write_epilog (GumExecCtx * ctx,
   gum_arm64_writer_put_ldp_reg_reg_reg_offset (cw, AArch64_REG_X19,
       AArch64_REG_X20, AArch64_REG_SP, 16 + GUM_RED_ZONE_SIZE,
       GUM_INDEX_POST_ADJUST);
+  
 }
 
 static void
@@ -3757,6 +3776,8 @@ static gboolean
 gum_exec_ctx_try_handle_exception (GumExecCtx * ctx,
                                    GumExceptionDetails * details)
 {
+  //printf("handle exception %p %p\n",details->address,details->memory.address);
+
   GumCpuContext * cpu_context = &details->context;
   const guint32 * insn;
 
@@ -3767,7 +3788,8 @@ gum_exec_ctx_try_handle_exception (GumExecCtx * ctx,
 
   if (cpu_context->sp % GUM_STACK_ALIGNMENT == 0)
     return FALSE;
-
+  
+  //printf("%p, %x\n",insn,*insn);
   switch (*insn)
   {
     /* STP */
@@ -3803,6 +3825,7 @@ gum_exec_ctx_try_handle_exception (GumExecCtx * ctx,
     default:
       break;
   }
+ 
 
   return FALSE;
 }
@@ -3818,9 +3841,9 @@ gum_exec_ctx_handle_stp (GumCpuContext * cpu_context,
   cpu_context->sp -= offset;
 
   sp = GSIZE_TO_POINTER (cpu_context->sp);
+
   sp[0] = gum_exec_ctx_read_register (cpu_context, reg1);
   sp[1] = gum_exec_ctx_read_register (cpu_context, reg2);
-
   cpu_context->pc += 4;
 }
 
@@ -4307,11 +4330,12 @@ gum_exec_block_virtualize_branch_insn (GumExecBlock * block,
   GumBranchTarget target = { 0, };
 
   g_assert (arm64->op_count != 0);
-
-  is_conditional = (id == AArch64_INS_B && cc != AArch64CC_Invalid) ||
+  
+  is_conditional = (id == AArch64_INS_B && AArch64CC_EQ <= cc && cc<=AArch64CC_LE) ||
       (id == AArch64_INS_CBZ) || (id == AArch64_INS_CBNZ) ||
       (id == AArch64_INS_TBZ) || (id == AArch64_INS_TBNZ);
-
+  
+  printf("branch is %s %s %x %d\n",insn->ci->mnemonic,insn->ci->op_str,*((guint32 *) insn->start),is_conditional);
   target.origin_ip = insn->end;
 
   switch (id)
@@ -4334,7 +4358,7 @@ gum_exec_block_virtualize_branch_insn (GumExecBlock * block,
     case AArch64_INS_BLRAAZ:
     case AArch64_INS_BLRAB:
     case AArch64_INS_BLRABZ:
-      g_assert (op->type == ARM64_OP_REG);
+      g_assert (op->type == AArch64_OP_REG);
 
       target.reg = op->reg;
 
@@ -4343,8 +4367,8 @@ gum_exec_block_virtualize_branch_insn (GumExecBlock * block,
     case AArch64_INS_CBNZ:
       op2 = &arm64->operands[1];
 
-      g_assert (op->type == ARM64_OP_REG);
-      g_assert (op2->type == ARM64_OP_IMM);
+      g_assert (op->type == AArch64_OP_REG);
+      g_assert (op2->type == AArch64_OP_IMM);
 
       target.absolute_address = GSIZE_TO_POINTER (op2->imm);
       target.reg = AArch64_REG_INVALID;
@@ -4355,9 +4379,9 @@ gum_exec_block_virtualize_branch_insn (GumExecBlock * block,
       op2 = &arm64->operands[1];
       op3 = &arm64->operands[2];
 
-      g_assert (op->type == ARM64_OP_REG);
-      g_assert (op2->type == ARM64_OP_IMM);
-      g_assert (op3->type == ARM64_OP_IMM);
+      g_assert (op->type == AArch64_OP_REG);
+      g_assert (op2->type == AArch64_OP_IMM);
+      g_assert (op3->type == AArch64_OP_IMM);
 
       target.absolute_address = GSIZE_TO_POINTER (op3->imm);
       target.reg = AArch64_REG_INVALID;
@@ -4405,7 +4429,7 @@ gum_exec_block_virtualize_branch_insn (GumExecBlock * block,
             g_assert (cc > ARM64_CC_INVALID);
             g_assert (cc <= ARM64_CC_NV);
 
-            not_cc = cc + 2 * (cc % 2) - 1;
+            not_cc =AArch64CC_getInvertedCondCode(cc);
             gum_arm64_writer_put_b_cond_label (cw, not_cc, is_false);
 
             cond_entry_func = GUM_ENTRYGATE (jmp_cond_cc);
@@ -4437,11 +4461,13 @@ gum_exec_block_virtualize_branch_insn (GumExecBlock * block,
       }
       else
       {
+        
         if (target.reg != AArch64_REG_INVALID)
           regular_entry_func = GUM_ENTRYGATE (jmp_reg);
         else
           regular_entry_func = GUM_ENTRYGATE (jmp_imm);
         cond_entry_func = NULL;
+        printf("brach is not condtion\n");
       }
 
       gum_exec_block_write_jmp_transfer_code (block, &target,
@@ -5001,6 +5027,7 @@ gum_exec_block_write_jmp_transfer_code (GumExecBlock * block,
                                         GumExecCtxReplaceCurrentBlockFunc func,
                                         GumGeneratorContext * gc)
 {
+  //printf("jump to %p \n",func);
   GumStalker * stalker = block->ctx->stalker;
   const gint trust_threshold = stalker->trust_threshold;
   GumArm64Writer * cw = gc->code_writer;
@@ -5016,6 +5043,7 @@ gum_exec_block_write_jmp_transfer_code (GumExecBlock * block,
   if (trust_threshold >= 0 && !can_backpatch_statically)
   {
     aarch64_reg result_reg;
+    printf("not can_backpatch_statically \n");
 
     gum_exec_block_close_prolog (block, gc, cw);
 
@@ -5026,6 +5054,7 @@ gum_exec_block_write_jmp_transfer_code (GumExecBlock * block,
      */
     result_reg = gum_exec_block_write_inline_cache_code (block, target->reg,
         cw, cws);
+      
     gum_arm64_writer_put_br_reg_no_auth (cw, result_reg);
   }
   else

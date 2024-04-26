@@ -577,7 +577,7 @@ gum_arm64_writer_put_b_cond_label (GumArm64Writer * self,
                                    gconstpointer label_id)
 {
   gum_arm64_writer_add_label_reference_here (self, label_id, GUM_ARM64_B_COND);
-  gum_arm64_writer_put_instruction (self, 0x54000000 | (cc - 1));
+  gum_arm64_writer_put_instruction (self, 0x54000000 | (cc));
 }
 
 gboolean
