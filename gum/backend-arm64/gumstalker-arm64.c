@@ -807,35 +807,6 @@ static void gum_dump_exec_block(csh capstone,GumExecBlock * block)
     g_debug("%llx:%s %s",insn[i].address,insn[i].mnemonic,insn[i].op_str);
   }
   cs_free( insn, count);
-
-  // g_debug("---------------------------");
-  // code=block->code_slab->slab.data;
-  // size=block->code_slab->slab.size;
-  // guint64 offset = block->code_slab->slab.offset;
-  // count=cs_disasm(capstone ,code, size,offset , 0, &insn);
-  // for(gsize i=0;i<count;i++){
-  //   g_debug("%llx:%s %s",insn[i].address,insn[i].mnemonic,insn[i].op_str);
-  // }
-  // cs_free( insn, count);
-  
-  // csh cap=ctx->relocator.capstone;
-  
- 
-  //
-  // gsize count=0;
-  // g_debug("========dump trans=====");
-  
-  // // code=ctx->current_block->code_slab;
-  // // size=ctx->current_block->;
-  
-  // code=ctx->current_block->code_start;
-  // size=ctx->current_block->code_size;
-  // count=cs_disasm(cap ,code, size, code, 0, &insn);
-  // for(gsize i=0;i<count;i++){
-  //   g_debug("%llx:%s %s",insn[i].address,insn[i].mnemonic,insn[i].op_str);
-  // }
-  // cs_free( insn, count);
-  // g_debug("========dump end======");
 }
 static void gum_dump_inst(GumExecCtx * ctx,guint8 * strat,gsize size);
 
@@ -2835,7 +2806,7 @@ gum_exec_ctx_compile_block (GumExecCtx * ctx,
   if (gc.continuation_real_address != NULL)
   {
     GumBranchTarget continue_target = { 0, };
-
+    printf("gum_exec_ctx_compile_block continuation_real_address %p\n", gc.continuation_real_address);
     continue_target.absolute_address = gc.continuation_real_address;
     continue_target.reg = AArch64_REG_INVALID;
     gum_exec_block_write_jmp_transfer_code (block, &continue_target,
@@ -2854,7 +2825,7 @@ gum_exec_ctx_compile_block (GumExecCtx * ctx,
   *input_size = rl->input_cur - rl->input_start;
   *output_size = gum_arm64_writer_offset (cw);
   *slow_size = gum_arm64_writer_offset (cws);
-  g_debug("gum_exec_ctx_compile_block %p\n",block->real_start);
+ 
 }
 
 static void
@@ -2885,7 +2856,6 @@ gum_stalker_iterator_next (GumStalkerIterator * self,
 
   instruction = self->generator_context->instruction;
   is_first_instruction = instruction == NULL;
-
   if (instruction != NULL)
   {
     gboolean skip_implicitly_requested;
@@ -2910,6 +2880,7 @@ gum_stalker_iterator_next (GumStalkerIterator * self,
   instruction = &self->instruction;
 
   n_read = gum_arm64_relocator_read_one (rl, &instruction->ci);
+  
   if (n_read == 0)
     return FALSE;
 
@@ -2923,10 +2894,9 @@ gum_stalker_iterator_next (GumStalkerIterator * self,
     gum_exec_block_write_block_event_code (self->exec_block, gc,
         GUM_CODE_INTERRUPTIBLE);
   }
-
-  if (insn != NULL)
-    *insn = instruction->ci;
-
+  if (insn != NULL){
+     *insn = instruction->ci;
+  }
   return TRUE;
 }
 

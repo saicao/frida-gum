@@ -1,8 +1,7 @@
-
-#line 2 
+#line 2
 #include "json-glib/json-glib.h"
 #include <gum/gummodulemap.h>
-#include "gum/gumstalker.h"
+#include <gum/gumstalker.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -20,21 +19,26 @@ typedef struct _ITraceSession ITraceSession;
 typedef struct _ITraceBuffer ITraceBuffer;
 
 enum _ITraceState {
-  ITRACE_STATE_CREATED,
-  ITRACE_STATE_STARTING,
-  ITRACE_STATE_STARTED,
-  ITRACE_STATE_ENDED,
+  STRACE_STATE_CREATED,
+  STRACE_STATE_STARTING,
+  STRACE_STATE_STARTED,
+  STRACE_STATE_ENDED,
 };
 
 struct _ITraceSession {
   ITraceState state;
-  guint64 pending_size;
+  guint64 log_buf_size;
   guint64 saved_regs[2];
   // shallow stack use for write_impl
   //  guint64 stack[64];
   guint64 scratch_regs[SCRATCH_REG_TOP - SCRATCH_REG_BOTTOM + 1];
-  guint64 log_buf[1969];
+  guint64 log_buf[1024];
   GumModuleMap *modules;
+  JsonBuilder *meta;
+  aarch64_reg prev_session_reg;
+  gboolean block_compile_done;
+  guint64 block_size;
+  guint64 block_address;
 };
 
 extern ITraceSession session;
@@ -52,9 +56,10 @@ static void add_block_write_meta(JsonBuilder *meta, guint block_offset,
                                  guint cpu_reg_index);
 static void add_memory_address(JsonBuilder *builder, GumAddress address);
 static gchar *make_json(JsonBuilder **builder);
-static aarch64_reg pick_scratch_register(cs_regs regs_read, uint8_t num_regs_read,
-                                       cs_regs regs_written,
-                                       uint8_t num_regs_written);
+static aarch64_reg pick_scratch_register(cs_regs regs_read,
+                                         uint8_t num_regs_read,
+                                         cs_regs regs_written,
+                                         uint8_t num_regs_written);
 static aarch64_reg register_to_full_size_register(aarch64_reg reg);
 static void emit_scratch_register_restore(GumArm64Writer *cw, aarch64_reg reg);
 static cs_err atomic_regs_access(const cs_insn *insn, cs_regs regs_read,
@@ -63,17 +68,19 @@ static cs_err atomic_regs_access(const cs_insn *insn, cs_regs regs_read,
 
 static void js_log(const char *format, ...);
 
-static void dump_insts(csh cap,guint8 * strat,gsize size);
+static void dump_insts(csh cap, guint8 *strat, gsize size);
 
-void dump_insts(csh cap,guint8 * strat,gsize size){
-    cs_insn * insn;
-    printf("======dump inst base:%p size:%lu=======\n",strat,size);
-    gsize count=cs_disasm(cap ,strat, size, (guint64)strat, 0, &insn);
-    for(gsize i=0;i<count;i++){
-      printf("%llx:%s %s\n",insn[i].address,insn[i].mnemonic,insn[i].op_str);
-    }
-    cs_free( insn, count);
-    printf("======dump inst end=======\n");
+void dump_insts(csh cap, guint8 *strat, gsize size) {
+  cs_insn *insn;
+  cs_option(cap, CS_OPT_SKIPDATA, CS_OPT_ON);
+  printf("======dump inst base:%p size:%lu=======\n", strat, size);
+  gsize count = cs_disasm(cap, strat, size, (guint64)strat, 0, &insn);
+  for (gsize i = 0; i < count; i++) {
+    printf("%llx:%s %s\n", insn[i].address, insn[i].mnemonic, insn[i].op_str);
+  }
+  cs_free(insn, count);
+  cs_option(cap, CS_OPT_SKIPDATA, CS_OPT_OFF);
+  printf("======dump inst end=======\n");
 }
 // 如果所有的都正确的话，我们不需要这些。
 // javascript 只支持 48bit
@@ -81,9 +88,10 @@ extern void js_on_block_exec(gpointer ctx, guint32 ctx_size, gpointer buf,
                              guint32 buf_size);
 static void on_block_exec(GumCpuContext *cpu_context, gpointer user_data);
 static void on_block_exec(GumCpuContext *cpu_context, gpointer user_data) {
-  printf("pending size%llu\n",session.pending_size);
+  printf("pending size %llu\n", session.log_buf_size);
   js_on_block_exec(cpu_context, sizeof(GumCpuContext), session.log_buf,
-                   session.pending_size);
+                   session.log_buf_size);
+  printf("on_block_exec done\n");
 };
 static inline uint32_t extract32(uint32_t value, int start, int length);
 void init(void) {
@@ -107,63 +115,88 @@ cs_err regs_access(csh ud, const cs_insn *insn, cs_regs regs_read,
       regs_write[*regs_write_count] = reg;
       *regs_write_count = *regs_write_count + 1;
     }
+    regs_write[*regs_write_count++] =AArch64_REG_NZCV;
     return CS_ERR_OK;
   }
   // check and decode atomic
-//   err = atomic_regs_access(insn, regs_read, regs_read_count, regs_write,
-//                            regs_write_count);
-//   if (err == CS_ERR_OK) {
-//     return CS_ERR_OK;
-//   }
+  //   err = atomic_regs_access(insn, regs_read, regs_read_count, regs_write,
+  //                            regs_write_count);
+  //   if (err == CS_ERR_OK) {
+  //     return CS_ERR_OK;
+  //   }
   err = cs_regs_access(ud, insn, regs_read, regs_read_count, regs_write,
                        regs_write_count);
 
   return err;
 }
 
+// transform may not give you a whole block;
 void transform(GumStalkerIterator *iterator, GumStalkerOutput *output,
                gpointer user_data) {
+
+  printf("%s\n", "transform");
   GumArm64Writer *cw = output->writer.arm64;
   csh capstone = gum_stalker_iterator_get_capstone(iterator);
 
   guint num_instructions = 0;
-  GumAddress block_address = 0;
-  guint log_buf_offset = 16;
-  aarch64_reg prev_session_reg = AArch64_REG_INVALID;
 
-  JsonBuilder *meta = json_builder_new_immutable();
-  json_builder_begin_object(meta);
+  guint log_buf_offset = session.log_buf_size;
+  if (log_buf_offset >= sizeof(session.log_buf)) {
+    printf("can not hold more reg info\n");
+    ABORT();
+  }
+  GumAddress first_insn_address = 0;
 
   cs_insn *insn;
 
-  gboolean is_last_in_block = false;
+  // gboolean block_compile_done = false;
+  // init
+
   while (gum_stalker_iterator_next(iterator, &insn)) {
+    // only work after call next
+    printf("transform %llx %s %s \n",insn->address,insn->mnemonic,insn->op_str);
     
-    num_instructions++;
     gboolean is_first_in_block = num_instructions == 1;
-    is_last_in_block = cs_insn_group(capstone, insn, CS_GRP_JUMP) ||
-                       cs_insn_group(capstone, insn, CS_GRP_RET);
-    if (session.state == ITRACE_STATE_CREATED) {
-      session.state = ITRACE_STATE_STARTING;
+    if (session.state == STRACE_STATE_CREATED) {
+      session.state = STRACE_STATE_STARTING;
       gum_stalker_iterator_put_callout(iterator, on_first_block_hit, NULL,
                                        NULL);
+      session.prev_session_reg = AArch64_REG_INVALID;
+      session.block_compile_done = true;
     }
-    if (is_first_in_block) {
 
-      // 只是简单跳过所exclusive 中的指令，我们只抓最一次exclusvie blcok
-      // to do 增加缓存和计数器？保存所有exclusive block 信息？
-      if (gum_stalker_iterator_get_memory_access(iterator) ==
-          GUM_MEMORY_ACCESS_OPEN) {
-        gum_stalker_iterator_put_callout(iterator, on_block_exec, NULL, NULL);
-      }else{
-        printf("memory close \n");
+    num_instructions++;
+    if (num_instructions == 1) {
+      first_insn_address = insn->address;
+      if (session.block_compile_done) {
+        // hit new block
+
+        if (gum_stalker_iterator_get_memory_access(iterator) ==
+            GUM_MEMORY_ACCESS_OPEN) {
+          gum_stalker_iterator_put_callout(iterator, on_block_exec, NULL, NULL);
+          // gum_arm64_writer_put_brk_imm(cw,0x1234);
+        } else {
+          printf("memory close \n");
+        }
+        log_buf_offset = 16;
+        session.meta = json_builder_new_immutable();
+        json_builder_begin_object(session.meta);
+
+        printf("start build writes header\n");
+        json_builder_set_member_name(session.meta, "writes");
+        json_builder_begin_array(session.meta);
+        //start new blcok;
+        GumAddress block_address = insn->address;
+        session.block_address = block_address;
+        session.block_size=0;
       }
-      block_address = insn->address;
-
-      json_builder_set_member_name(meta, "writes");
-      json_builder_begin_array(meta);
     }
-
+    session.block_compile_done = cs_insn_group(capstone, insn, CS_GRP_JUMP) ||
+                                 cs_insn_group(capstone, insn, CS_GRP_RET)||
+                                 cs_insn_group(capstone, insn, CS_GRP_CALL);
+    // commit last reg readings
+    // 只是简单跳过所exclusive 中的指令，我们只抓最一次exclusvie blcok
+    // to do 增加缓存和计数器？保存所有exclusive block 信息？
     cs_regs regs_read, regs_written;
     uint8_t num_regs_read, num_regs_written;
 
@@ -178,60 +211,62 @@ void transform(GumStalkerIterator *iterator, GumStalkerOutput *output,
     }
 
     aarch64_reg session_reg =
-        is_last_in_block
+        session.block_compile_done
             ? SCRATCH_REG_TOP
             : pick_scratch_register(regs_read, num_regs_read, regs_written,
                                     num_regs_written);
 
-    if (session_reg != prev_session_reg) {
-      if (prev_session_reg != AArch64_REG_INVALID)
-        gum_arm64_writer_put_mov_reg_reg(cw, session_reg, prev_session_reg);
-      else
+    if (session_reg != session.prev_session_reg) {
+      if (session.prev_session_reg != AArch64_REG_INVALID) {
+        gum_arm64_writer_put_mov_reg_reg(cw, session_reg,
+                                         session.prev_session_reg);
+        emit_scratch_register_restore(cw, session.prev_session_reg);
+      } else {
         gum_arm64_writer_put_ldr_reg_address(cw, session_reg,
                                              GUM_ADDRESS(&session));
+      }
     }
-
-    if (prev_session_reg != AArch64_REG_INVALID &&
-        session_reg != prev_session_reg)
-      emit_scratch_register_restore(cw, prev_session_reg);
-
+    // always save lr
     if (is_first_in_block) {
       gum_arm64_writer_put_str_reg_reg_offset(
           cw, AArch64_REG_LR, session_reg,
           G_STRUCT_OFFSET(ITraceSession, log_buf) + 8);
     }
-    if (is_last_in_block) {
+
+    if (session.block_compile_done) {
       gum_arm64_writer_put_stp_reg_reg_reg_offset(
           cw, AArch64_REG_X27, AArch64_REG_LR, session_reg,
           G_STRUCT_OFFSET(ITraceSession, saved_regs), GUM_INDEX_SIGNED_OFFSET);
       // 我们知道offset 在runtime之前，但是要保存此值 mov
       // log_buf_offset，将block信息写入指令中。
-      gum_arm64_writer_put_ldr_reg_u64(cw, AArch64_REG_X27, block_address);
+      gum_arm64_writer_put_ldr_reg_u64(cw, AArch64_REG_X27,
+                                       session.block_address);
       gum_arm64_writer_put_str_reg_reg_offset(
           cw, AArch64_REG_X27, session_reg,
           G_STRUCT_OFFSET(ITraceSession, log_buf));
       // 我们知道offset 在runtime之前，但是要保存此值 mov
       // log_buf_offset，将block信息写入指令中。
       gum_arm64_writer_put_ldr_reg_u64(cw, AArch64_REG_X27, log_buf_offset);
-
       gum_arm64_writer_put_str_reg_reg_offset(
           cw, AArch64_REG_X27, session_reg,
-          G_STRUCT_OFFSET(ITraceSession, pending_size));
+          G_STRUCT_OFFSET(ITraceSession, log_buf_size));
       gum_arm64_writer_put_ldp_reg_reg_reg_offset(
           cw, AArch64_REG_X27, AArch64_REG_LR, session_reg,
           G_STRUCT_OFFSET(ITraceSession, saved_regs), GUM_INDEX_SIGNED_OFFSET);
 
       emit_scratch_register_restore(cw, session_reg);
+      session.prev_session_reg = AArch64_REG_INVALID;
     }
-
+    guint block_offset = (insn->address) - session.block_address;
+    
+    session.block_size += insn->size;
+    //when is insn get freed?
     gum_stalker_iterator_keep(iterator);
-
+  
     // last block 不需要抓寄存器
-    if (is_last_in_block)
+    if (session.block_compile_done)
       continue;
-
-    guint block_offset = (insn->address) - block_address;
-
+    //save scratch_reg
     for (uint8_t i = 0; i != num_regs_written; i++) {
       aarch64_reg reg = regs_written[i];
       gboolean is_scratch_reg =
@@ -314,11 +349,8 @@ void transform(GumStalkerIterator *iterator, GumStalkerOutput *output,
       // TODO: Handle large offsets
       gum_arm64_writer_put_str_reg_reg_offset(cw, source_reg, session_reg,
                                               offset);
-      //   if (*((guint *)(insn->bytes)) == 0xfd46ad21) {
-      //     printf("offset %lu log buf %u\n" ,offset,log_buf_offset);
-      //     gum_arm64_writer_put_brk_imm(cw, 0x14);
-      //   }
-      add_block_write_meta(meta, block_offset, cpu_reg_index);
+
+      add_block_write_meta(session.meta, block_offset, cpu_reg_index);
       log_buf_offset += paddings + size;
 
       if (temp_reg != AArch64_REG_INVALID)
@@ -326,77 +358,73 @@ void transform(GumStalkerIterator *iterator, GumStalkerOutput *output,
             cw, temp_reg, session_reg,
             G_STRUCT_OFFSET(ITraceSession, saved_regs));
     }
+    
 
-    prev_session_reg = session_reg;
-    // if (insn->id == AArch64_INS_LDADDAL) {
-    //     ABORT();
-    // }
+    session.prev_session_reg = session_reg;
   }
-
-  json_builder_end_array(meta);
-  json_builder_set_member_name(meta, "address");
-  add_memory_address(meta, block_address);
-
-  json_builder_set_member_name(meta, "size");
-  json_builder_add_int_value(meta,
-                             (insn->address + insn->size) - block_address);
-
-  json_builder_set_member_name(meta, "compiled");
-  json_builder_begin_object(meta);
-  {
-    guint compiled_code_size = gum_arm64_writer_offset(cw);
-
-    json_builder_set_member_name(meta, "address");
-    add_memory_address(meta, cw->pc - compiled_code_size);
-
-    json_builder_set_member_name(meta, "size");
-    json_builder_add_int_value(meta, compiled_code_size);
-  }
-  json_builder_end_object(meta);
-
-  const GumModuleDetails *m =
-      gum_module_map_find(session.modules, block_address);
-  if (m != NULL) {
-    json_builder_set_member_name(meta, "name");
-    gchar *name = g_strdup_printf(
-        "%s!0x%x", m->name, (guint)(block_address - m->range->base_address));
-    json_builder_add_string_value(meta, name);
-    g_free(name);
-
-    json_builder_set_member_name(meta, "module");
-    json_builder_begin_object(meta);
-
-    json_builder_set_member_name(meta, "path");
-    json_builder_add_string_value(meta, m->path);
-
-    json_builder_set_member_name(meta, "base");
-    add_memory_address(meta, m->range->base_address);
-
-    json_builder_end_object(meta);
-  } else {
-    json_builder_set_member_name(meta, "name");
-    add_memory_address(meta, block_address);
-  }
-
-  json_builder_end_object(meta);
-
-  gchar *json = make_json(&meta);
 
   
-  on_compile(json);
-  guint64 compiled_code_size=gum_arm64_writer_offset(cw);
-  guint64 compile_start=(guint64)cw->base;
-  printf("%llx %llu\n",compile_start,compiled_code_size);
-  dump_insts(capstone, (void*)compile_start, compiled_code_size);
-  ABORT();
-  g_free(json);
+  printf("%s %d\n", "gum_stalker_iterator_done ",session.block_compile_done);
+  
+  
+  if (session.block_compile_done) {
+    printf(" block_compile_done\n");
+    // end build write
+    json_builder_end_array(session.meta);
+    printf("start build block header\n");
+    json_builder_set_member_name(session.meta, "address");
+    add_memory_address(session.meta, session.block_address);
+
+    json_builder_set_member_name(session.meta, "size");
+
+    json_builder_add_int_value(session.meta, session.block_size);
+    printf("start build module header\n");
+    const GumModuleDetails *m =
+        gum_module_map_find(session.modules, session.block_address);
+    if (m != NULL) {
+      json_builder_set_member_name(session.meta, "name");
+      gchar *name = g_strdup_printf(
+          "%s!0x%x", m->name,
+          (guint)(session.block_address - m->range->base_address));
+      json_builder_add_string_value(session.meta, name);
+      g_free(name);
+
+      json_builder_set_member_name(session.meta, "module");
+      json_builder_begin_object(session.meta);
+
+      json_builder_set_member_name(session.meta, "path");
+      json_builder_add_string_value(session.meta, m->path);
+
+      json_builder_set_member_name(session.meta, "base");
+      add_memory_address(session.meta, m->range->base_address);
+
+      json_builder_end_object(session.meta);
+    } else {
+      json_builder_set_member_name(session.meta, "name");
+      add_memory_address(session.meta, session.block_address);
+    }
+    json_builder_end_object(session.meta);
+    gchar *json = make_json(&session.meta);
+    printf("%s\n", json);
+    guint64 compiled_code_size = gum_arm64_writer_offset(cw);
+    guint64 compile_start = (guint64)cw->base;
+    dump_insts(capstone, (void *)compile_start, compiled_code_size);
+    on_compile(json);
+    g_free(json);
+  }
+
+  if (num_instructions == 0) {
+    printf("transform an empty block\n");
+    ABORT();
+  }
+  printf("%s\n", "transform done");
 }
 
 static void on_first_block_hit(GumCpuContext *cpu_context, gpointer user_data) {
-  if (session.state != ITRACE_STATE_STARTING)
+  if (session.state != STRACE_STATE_STARTING)
     return;
-  session.state = ITRACE_STATE_STARTED;
 
+  session.state = STRACE_STATE_STARTED;
   memcpy(session.scratch_regs,
          cpu_context->x + (SCRATCH_REG_BOTTOM - AArch64_REG_X0),
          sizeof(session.scratch_regs));
@@ -432,6 +460,7 @@ static void on_first_block_hit(GumCpuContext *cpu_context, gpointer user_data) {
   json_builder_end_object(meta);
   gchar *json = make_json(&meta);
   on_start(json, cpu_context, sizeof(GumCpuContext));
+  printf("send meta %s\n", json);
   g_free(json);
 }
 static void add_cpu_system_register_meta(JsonBuilder *meta, const gchar *name,
@@ -463,6 +492,7 @@ static void add_cpu_register_meta(JsonBuilder *meta, const gchar *name,
 
 static void add_block_write_meta(JsonBuilder *meta, guint block_offset,
                                  guint cpu_ctx_offset) {
+  printf("add_block_write_meta %d %d\n", block_offset, cpu_ctx_offset);
   json_builder_begin_array(meta);
   json_builder_add_int_value(meta, block_offset);
   json_builder_add_int_value(meta, cpu_ctx_offset);
@@ -488,9 +518,10 @@ static gchar *make_json(JsonBuilder **builder) {
   return json;
 }
 
-static aarch64_reg pick_scratch_register(cs_regs regs_read, uint8_t num_regs_read,
-                                       cs_regs regs_written,
-                                       uint8_t num_regs_written) {
+static aarch64_reg pick_scratch_register(cs_regs regs_read,
+                                         uint8_t num_regs_read,
+                                         cs_regs regs_written,
+                                         uint8_t num_regs_written) {
   aarch64_reg candidate;
 
   for (candidate = SCRATCH_REG_TOP; candidate != SCRATCH_REG_BOTTOM - 1;
@@ -544,8 +575,8 @@ static aarch64_reg register_to_full_size_register(aarch64_reg reg) {
 
   if (reg >= AArch64_REG_Q0 && reg <= AArch64_REG_Q31)
     return reg;
-//   if (reg >= AArch64_REG_V0 && reg <= AArch64_REG_V31)
-//     return AArch64_REG_Q0 + (reg - AArch64_REG_V0);
+  //   if (reg >= AArch64_REG_V0 && reg <= AArch64_REG_V31)
+  //     return AArch64_REG_Q0 + (reg - AArch64_REG_V0);
   if (reg >= AArch64_REG_D0 && reg <= AArch64_REG_D31)
     return AArch64_REG_Q0 + (reg - AArch64_REG_D0);
   if (reg >= AArch64_REG_S0 && reg <= AArch64_REG_S31)

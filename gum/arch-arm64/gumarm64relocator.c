@@ -8,7 +8,6 @@
 
 #include "gumarm64relocator.h"
 
-#include "capstone.h"
 #include "gummemory.h"
 
 #define GUM_MAX_INPUT_INSN_COUNT (100)
