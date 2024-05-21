@@ -794,7 +794,7 @@ static void gum_dump_exec_block(csh capstone,GumExecBlock * block)
 {
   
   
-  g_debug("-------------%p=>%p-----------",block->real_start,block->code_start);
+  printf("-------------%p=>%p-----------\n",block->real_start,block->code_start);
   gsize size;
   guint8 * code;
   gsize count;
@@ -802,25 +802,25 @@ static void gum_dump_exec_block(csh capstone,GumExecBlock * block)
   size=block->real_size;
   
   cs_insn * insn;
-  count=cs_disasm(capstone ,code, size, code, 0, &insn);
+  count=cs_disasm(capstone ,code, size,code, 0, &insn);
   for(gsize i=0;i<count;i++){
-    g_debug("%llx:%s %s",insn[i].address,insn[i].mnemonic,insn[i].op_str);
+    printf("%llx:%s %s\n",insn[i].address,insn[i].mnemonic,insn[i].op_str);
   }
   cs_free( insn, count);
 }
-static void gum_dump_inst(GumExecCtx * ctx,guint8 * strat,gsize size);
+// static void gum_dump_inst(GumExecCtx * ctx,guint8 * strat,gsize size);
 
-void gum_dump_inst(GumExecCtx * ctx,guint8 * strat,gsize size){
-    csh cap=ctx->relocator.capstone;
-    cs_insn * insn;
-    g_debug("======dump inst base:%llx size:%lu=======",strat,size);
-    gsize count=cs_disasm(cap ,strat, size, strat, 0, &insn);
-    for(gsize i=0;i<count;i++){
-      g_debug("%llx:%s %s",insn[i].address,insn[i].mnemonic,insn[i].op_str);
-    }
-    cs_free( insn, count);
-    g_debug("======dump inst end=======");
-}
+// void gum_dump_inst(GumExecCtx * ctx,guint8 * strat,gsize size){
+//     csh cap=ctx->relocator.capstone;
+//     cs_insn * insn;
+//     g_debug("======dump inst base:%llx size:%lu=======",strat,size);
+//     gsize count=cs_disasm(cap ,strat, size, strat, 0, &insn);
+//     for(gsize i=0;i<count;i++){
+//       g_debug("%llx:%s %s",insn[i].address,insn[i].mnemonic,insn[i].op_str);
+//     }
+//     cs_free( insn, count);
+//     g_debug("======dump inst end=======");
+// }
 gboolean
 gum_stalker_is_supported (void)
 {
@@ -1445,7 +1445,7 @@ gum_stalker_infect (GumThreadId thread_id,
       infect_context->transformer, infect_context->sink);
 
   pc = GSIZE_TO_POINTER (gum_strip_code_address (cpu_context->pc));
-
+  printf("obtain pc %p\n",pc);
   ctx->current_block = gum_exec_ctx_obtain_block_for (ctx, pc, &code_address);
 
   if (gum_exec_ctx_maybe_unfollow (ctx, NULL))
@@ -2107,6 +2107,7 @@ static gboolean
 gum_stalker_on_exception (GumExceptionDetails * details,
                           gpointer user_data)
 {
+  printf("exceptoin\n");
   GumStalker * self = user_data;
   GumExecCtx * ctx;
 
@@ -2404,12 +2405,13 @@ gum_exec_ctx_may_now_backpatch (GumExecCtx * ctx,
         GumExecBlock * block, \
         gpointer start_address, \
         gpointer from_insn) \
-    { \
+    { printf("call %s\n",#name);\
       GumExecCtx * ctx = block->ctx; \
       \
       if (ctx->observer != NULL) \
         gum_stalker_observer_increment_##name (ctx->observer); \
       \
+      printf("call end%s\n",#name);\
       return gum_exec_ctx_switch_block (ctx, block, start_address, from_insn); \
     }
 
@@ -2436,6 +2438,8 @@ gum_exec_ctx_switch_block (GumExecCtx * ctx,
                            gpointer start_address,
                            gpointer from_insn)
 {
+
+  printf("gum_exec_ctx_switch_block\n");
   if (ctx->observer != NULL)
     gum_stalker_observer_increment_total (ctx->observer);
 
@@ -2448,10 +2452,12 @@ gum_exec_ctx_switch_block (GumExecCtx * ctx,
   }
   else if (start_address == gum_thread_exit_address)
   {
+    printf("gum_exec_ctx_unfollow\n");
     gum_exec_ctx_unfollow (ctx, start_address);
   }
   else if (gum_exec_ctx_maybe_unfollow (ctx, start_address))
   {
+    printf("gum_exec_ctx_maybe_unfollow\n");
   }
   else if (gum_exec_ctx_contains (ctx, start_address))
   {
@@ -2557,6 +2563,7 @@ gum_exec_ctx_obtain_block_for (GumExecCtx * ctx,
                                gpointer real_address,
                                gpointer * code_address)
 {
+  printf("gum_exec_ctx_obtain_block_for start %p\n",real_address);
   GumExecBlock * block;
 
   gum_spinlock_acquire (&ctx->code_lock);
@@ -4997,7 +5004,7 @@ gum_exec_block_write_jmp_transfer_code (GumExecBlock * block,
                                         GumExecCtxReplaceCurrentBlockFunc func,
                                         GumGeneratorContext * gc)
 {
-  //printf("jump to %p \n",func);
+  printf("gum_exec_block_write_jmp_transfer_code to %p \n",func);
   GumStalker * stalker = block->ctx->stalker;
   const gint trust_threshold = stalker->trust_threshold;
   GumArm64Writer * cw = gc->code_writer;

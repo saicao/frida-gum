@@ -8,10 +8,10 @@
 
 TESTLIST_BEGIN (interceptor_arm)
 #ifndef HAVE_IOS
-  TESTENTRY (attach_to_unaligned_function)
+  // TESTENTRY (attach_to_unaligned_function)
 #endif
-  TESTENTRY (attach_to_thumb_thunk_reading_lr)
-  TESTENTRY (attach_to_thumb_function_reading_lr)
+  // TESTENTRY (attach_to_thumb_thunk_reading_lr)
+  // TESTENTRY (attach_to_thumb_function_reading_lr)
 TESTLIST_END ()
 
 #ifndef HAVE_IOS

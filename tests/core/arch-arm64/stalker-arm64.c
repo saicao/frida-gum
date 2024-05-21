@@ -1556,6 +1556,7 @@ TESTCASE (follow_misaligned_stack)
     0x91000800, /* add x0, x0, #2             */
     0xd65f03c0, /* ret                        */
   };
+  printf("follow_misaligned_stack =======\n");
   StalkerTestFunc func;
 
   fixture->sink->mask = GUM_EXEC;

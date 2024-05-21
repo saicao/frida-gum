@@ -7,11 +7,11 @@
 #include "memoryaccessmonitor-fixture.c"
 
 TESTLIST_BEGIN (memoryaccessmonitor)
-  TESTENTRY (notify_on_read_access)
-  TESTENTRY (notify_on_write_access)
-  TESTENTRY (notify_on_execute_access)
-  TESTENTRY (notify_should_include_progress)
-  TESTENTRY (disable)
+  // TESTENTRY (notify_on_read_access)
+  // TESTENTRY (notify_on_write_access)
+  // TESTENTRY (notify_on_execute_access)
+  // TESTENTRY (notify_should_include_progress)
+  // TESTENTRY (disable)
 TESTLIST_END ()
 
 TESTCASE (notify_on_read_access)

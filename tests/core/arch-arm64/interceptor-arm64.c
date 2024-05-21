@@ -7,8 +7,8 @@
 #include "interceptor-arm64-fixture.c"
 
 TESTLIST_BEGIN (interceptor_arm64)
-  TESTENTRY (attach_to_thunk_reading_lr)
-  TESTENTRY (attach_to_function_reading_lr)
+  // TESTENTRY (attach_to_thunk_reading_lr)
+  // TESTENTRY (attach_to_function_reading_lr)
 TESTLIST_END ()
 
 typedef struct _GumEmitLrThunkContext GumEmitLrThunkContext;

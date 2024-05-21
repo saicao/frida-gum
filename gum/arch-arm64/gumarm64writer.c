@@ -1833,9 +1833,10 @@ void
 gum_arm64_writer_put_instruction (GumArm64Writer * self,
                                   guint32 insn)
 {
+  
+  // printf("put ins address %p %x\n",self->code,GUINT32_TO_LE (insn));
   *self->code++ = GUINT32_TO_LE (insn);
   self->pc += 4;
-
   gum_arm64_writer_maybe_commit_literals (self);
 }
 

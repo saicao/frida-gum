@@ -1450,9 +1450,9 @@ gum_darwin_modify_thread (mach_port_t thread,
 
   gum_darwin_parse_unified_thread_state (&state, &cpu_context);
   memcpy (&original_cpu_context, &cpu_context, sizeof (cpu_context));
-
+  printf("orgin pc: %llx new pc %llx\n",original_cpu_context.pc,cpu_context.pc);
   func (thread, &cpu_context, user_data);
-
+  printf("after infect orgin pc: %llx new pc %llx \n",original_cpu_context.pc,cpu_context.pc);
   if (memcmp (&cpu_context, &original_cpu_context, sizeof (cpu_context)) != 0)
   {
     gum_darwin_unparse_unified_thread_state (&cpu_context, &state);

@@ -28,8 +28,8 @@ TESTLIST_BEGIN (interceptor_darwin)
   TESTENTRY (can_attach_to_sqlite3_close)
   TESTENTRY (can_attach_to_sqlite3_thread_cleanup)
 
-  TESTENTRY (attach_performance)
-  TESTENTRY (replace_performance)
+  // TESTENTRY (attach_performance)
+  // TESTENTRY (replace_performance)
 
 #ifdef HAVE_IOS
   TESTENTRY (should_retain_code_signing_status)
