@@ -1909,6 +1909,7 @@ static void
 gum_exec_ctx_unfollow (GumExecCtx * ctx,
                        gpointer resume_at)
 {
+  
   ctx->current_block = NULL;
 
   ctx->resume_at = resume_at;

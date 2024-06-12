@@ -8,10 +8,10 @@
 #define RED_ZONE_SIZE 128
 #define SCRATCH_REG_BOTTOM AArch64_REG_X21
 #define SCRATCH_REG_TOP AArch64_REG_X28
-#define ABORT() 
-// #define ABORT()                                                                \
-//   int *__abort_at_here__ = NULL;                                               \
-//   *__abort_at_here__ = 1
+// #define ABORT()
+#define ABORT()                                                                \
+  int *__abort_at_here__ = NULL;                                               \
+  *__abort_at_here__ = 1
 #define SCRATCH_REG_INDEX(r) ((r)-SCRATCH_REG_BOTTOM)
 #define SCRATCH_REG_OFFSET(r) (SCRATCH_REG_INDEX(r) * 8)
 #define CS_INS_UINT32(cs_insn) *((gint32 *)(cs_insn->bytes))
@@ -63,21 +63,21 @@ static cs_err atomic_regs_access(const cs_insn *insn, cs_regs regs_read,
 
 static void js_log(const char *format, ...);
 
-static void dump_insts(csh cap,guint8 * strat,gsize size);
+// static void dump_insts(csh cap,guint8 * strat,gsize size);
 
-void dump_insts(csh cap,guint8 * strat,gsize size){
-    cs_insn * insn;
+// void dump_insts(csh cap,guint8 * strat,gsize size){
+//     cs_insn * insn;
     
-    printf("======dump inst base:%p size:%lu=======\n",strat,size);
-    cs_option(cap, CS_OPT_SKIPDATA, CS_OPT_ON);
-    gsize count=cs_disasm(cap ,strat, size, (guint64)strat, 0, &insn);
-    for(gsize i=0;i<count;i++){
-      printf("%llx:%s %s\n",insn[i].address,insn[i].mnemonic,insn[i].op_str);
-    }
-    cs_free( insn, count);
-    cs_option(cap, CS_OPT_SKIPDATA, CS_OPT_OFF);
-    printf("======dump inst end=======\n");
-}
+//     //printf("======dump inst base:%p size:%lu=======\n",strat,size);
+//     cs_option(cap, CS_OPT_SKIPDATA, CS_OPT_ON);
+//     gsize count=cs_disasm(cap ,strat, size, (guint64)strat, 0, &insn);
+//     for(gsize i=0;i<count;i++){
+//       //printf("%llx:%s %s\n",insn[i].address,insn[i].mnemonic,insn[i].op_str);
+//     }
+//     cs_free( insn, count);
+//     cs_option(cap, CS_OPT_SKIPDATA, CS_OPT_OFF);
+//     //printf("======dump inst end=======\n");
+// }
 // 如果所有的都正确的话，我们不需要这些。
 // javascript 只支持 48bit
 extern void js_on_block_exec(gpointer ctx, guint32 ctx_size, gpointer buf,
@@ -89,7 +89,6 @@ static void on_block_exec(GumCpuContext *cpu_context, gpointer user_data);
 
 
 static void on_block_exec(GumCpuContext *cpu_context, gpointer user_data) {
-  printf("pending size %llu\n",session.pending_size);
   js_on_block_exec(cpu_context, sizeof(GumCpuContext), session.log_buf,
                    session.pending_size);
 };
@@ -211,12 +210,6 @@ void transform(GumStalkerIterator *iterator, GumStalkerOutput *output,
       gum_stalker_iterator_put_callout(iterator, on_first_block_hit, NULL,
                                        NULL);
     }
-    if(CS_INS_UINT32(insn)==0x540001c1){
-      printf("block_address %llx\n",block_address);
-      ABORT();
-    }
-
-
     if (is_first_in_block) {
 
       // 只是简单跳过所exclusive 中的指令，我们只抓最一次exclusvie blcok
@@ -426,9 +419,7 @@ void transform(GumStalkerIterator *iterator, GumStalkerOutput *output,
           G_STRUCT_OFFSET(ITraceSession, saved_regs), GUM_INDEX_SIGNED_OFFSET);
 
       emit_scratch_register_restore(cw, session_reg);
-      printf("continue block\n");
-      ABORT();
-      
+
   }
 
   json_builder_end_array(meta);
@@ -482,10 +473,9 @@ void transform(GumStalkerIterator *iterator, GumStalkerOutput *output,
 
   
   on_compile(json);
-  guint64 compiled_code_size=gum_arm64_writer_offset(cw);
-  guint64 compile_start=(guint64)cw->base;
-  printf("%llx %llu\n",compile_start,compiled_code_size);
-  dump_insts(capstone, (void*)compile_start, compiled_code_size);
+  // guint64 compiled_code_size=gum_arm64_writer_offset(cw);
+  // guint64 compile_start=(guint64)cw->base;
+  // dump_insts(capstone, (void*)compile_start, compiled_code_size);
   g_free(json);
 }
 
