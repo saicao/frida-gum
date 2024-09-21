@@ -6,8 +6,13 @@
 
 #include "gumquickstalker.h"
 
+#include "glibconfig.h"
+#include "gumisralkeritransformer.h"
+#include "gummemory.h"
 #include "gumquickeventsink.h"
 #include "gumquickmacros.h"
+#include "gumstalker.h"
+#include "gumisralkeritransformer.h"
 
 #include <string.h>
 
@@ -90,6 +95,7 @@ GUMJS_DECLARE_FUNCTION (gumjs_stalker_flush)
 GUMJS_DECLARE_FUNCTION (gumjs_stalker_garbage_collect)
 GUMJS_DECLARE_FUNCTION (gumjs_stalker_exclude)
 GUMJS_DECLARE_FUNCTION (gumjs_stalker_follow)
+GUMJS_DECLARE_FUNCTION (gumjs_istalker_follow)
 GUMJS_DECLARE_FUNCTION (gumjs_stalker_unfollow)
 GUMJS_DECLARE_FUNCTION (gumjs_stalker_invalidate)
 GUMJS_DECLARE_FUNCTION (gumjs_stalker_add_call_probe)
@@ -575,6 +581,54 @@ GUMJS_DEFINE_FUNCTION (gumjs_stalker_follow)
   {
     gum_stalker_follow (stalker, thread_id, transformer, sink);
     g_object_unref (sink);
+    g_clear_object (&transformer);
+  }
+
+  return JS_UNDEFINED;
+}
+
+GUMJS_DEFINE_FUNCTION (gumjs_istalker_follow)
+{
+  GumQuickStalker * parent;
+  GumStalker * stalker;
+  GumThreadId thread_id;
+  // GumQuickEventSinkOptions so;
+  gpointer user_data;
+  GumStalkerTransformer * transformer;
+  GumEventSink * sink=NULL;
+
+  parent = gumjs_get_parent_module (core);
+  stalker = _gum_quick_stalker_get (parent);
+  gsize size=gum_query_page_size()*4;
+  // so.core = core;
+  // so.main_context = gum_script_scheduler_get_js_context (core->scheduler);
+  // so.queue_capacity = parent->queue_capacity;
+  // so.queue_drain_interval = parent->queue_drain_interval;
+
+  if (!_gum_quick_args_parse (args, "Z", &thread_id))
+    return JS_EXCEPTION;
+  
+  
+  GumStalkerItransformer *itransformer=g_object_new(GUM_TYPE_STALKER_ITRANSFORMER,NULL);
+  transformer=GUM_STALKER_TRANSFORMER(itransformer);
+ 
+  void *buf = gum_alloc_n_pages (4, GUM_PAGE_RW);
+  gum_stalker_itransformer_set_buf(itransformer,buf,size);
+
+  if (thread_id == gum_process_get_current_thread_id ())
+  {
+    GumQuickScope * scope = core->current_scope;
+
+    scope->pending_stalker_level = 1;
+
+    g_clear_object (&scope->pending_stalker_transformer);
+    g_clear_object (&scope->pending_stalker_sink);
+    scope->pending_stalker_transformer = transformer;
+    scope->pending_stalker_sink = sink;
+  }
+  else
+  {
+    gum_stalker_follow (stalker, thread_id, transformer, sink);
     g_clear_object (&transformer);
   }
 
