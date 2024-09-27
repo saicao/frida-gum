@@ -15,7 +15,7 @@ gboolean gum_darwin_sandbox_check();
  * @param mode 
  * @return GIOChannel* 
  */
-GIOChannel * gum_darwin_open_in_cache(const char *fileName,char * mode);
+GIOChannel * gum_darwin_open_in_cache_io(const char *fileName,char * mode);
 /**
  * @brief open a file
  * 
@@ -23,4 +23,6 @@ GIOChannel * gum_darwin_open_in_cache(const char *fileName,char * mode);
  * @param mode 
  * @return GIOChannel* 
  */
-GIOChannel * gum_darwin_open(const char *fileName,char * mode);
+GIOChannel * gum_darwin_open_io(const char *fileName,char * mode);
+int gum_darwin_open(const char *fileName, int mode, int flags);
+gboolean gum_darwin_vfs_init();

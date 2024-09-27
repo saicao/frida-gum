@@ -61,11 +61,7 @@ static cs_err atomic_regs_access(const cs_insn *insn, cs_regs regs_read,
                                  uint8_t *regs_read_count, cs_regs regs_write,
                                  uint8_t *regs_write_count);
 
-cs_err regs_access(csh ud, const cs_insn *insn, cs_regs regs_read,
-                   uint8_t *regs_read_count, cs_regs regs_write,
-                   uint8_t *regs_write_count) 
-
-// static void js_log(const char *format, ...);
+static void js_log(const char *format, ...);
 
 // static void dump_insts(csh cap,guint8 * strat,gsize size);
 

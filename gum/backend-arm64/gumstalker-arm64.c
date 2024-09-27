@@ -2615,7 +2615,7 @@ gum_exec_ctx_obtain_block_for (GumExecCtx * ctx,
   }
 
   *code_address = block->code_start;
-  gum_dump_exec_block(ctx->relocator.capstone,block);
+  // gum_dump_exec_block(ctx->relocator.capstone,block);
   return block;
 }
 
