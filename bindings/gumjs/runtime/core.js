@@ -562,6 +562,15 @@ if (globalThis.Stalker !== undefined) {
         Stalker._follow(threadId, transform, eventMask, onReceive, onCallSummary, onEvent, data);
       }
     },
+    followi: {
+      enumerable: true,
+      value: function (threadId, size){
+        if(size === undefined){
+          size=4;
+        }
+        Stalker._followi(threadId, size);
+      }
+    },
     parse: {
       enumerable: true,
       value: function (events, options = {}) {

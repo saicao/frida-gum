@@ -7,6 +7,7 @@
 
 #include "gum.h"
 
+#include "gio/gio.h"
 #include "glib/gprintf.h"
 #include "gum-init.h"
 #include "gumexceptorbackend.h"
@@ -23,6 +24,7 @@
 #endif
 #elif defined(HAVE_ARM64) && defined(HAVE_DARWIN)
 #include "backend-darwin/gumdarwin.h"
+#include <gum_darwin_oc/gumdarwinfile.h>
 #endif
 
 #include <stdarg.h>
@@ -124,7 +126,8 @@ static GPrivate gum_internal_thread_details_key =
 #endif
 
 static GumInterceptor *gum_cached_interceptor = NULL;
-static FILE *log_file = NULL;
+static GIOChannel *log_file = NULL;
+
 G_DEFINE_QUARK(gum - error - quark, gum_error)
 
 GUM_DEFINE_BOXED_TYPE(GumAddress, gum_address, gum_address_copy,
@@ -138,7 +141,22 @@ void gum_init(void) {
   gum_internal_heap_ref();
   gum_do_init();
 }
+static void gum_log_init(void) {
+  char name[128];
 
+#ifdef HAVE_DARWIN
+  if (gum_darwin_sandbox_check()) {
+    g_sprintf(name, "itrace_log_%d", getpid());
+    log_file = gum_darwin_open_in_cache(name, "w+");
+  } else {
+    g_sprintf(name, "/var/jb/var/root/log/itrace_log_%d", getpid());
+    log_file = gum_darwin_open(name, "w+");
+  }
+#endif
+  g_log_set_debug_enabled(true);
+  g_log_set_default_handler(gum_on_log_message, log_file);
+  g_debug("log inited");
+};
 void gum_shutdown(void) {
   g_slist_foreach(gum_early_destructors, (GFunc)gum_destructor_invoke, NULL);
   g_slist_free(gum_early_destructors);
@@ -158,8 +176,8 @@ void gum_deinit(void) {
 
   _gum_interceptor_deinit();
 
-  if (log_file != NULL)
-    fclose(log_file);
+  g_io_channel_shutdown(log_file, TRUE, NULL);
+  g_io_channel_unref(log_file);
 
   gum_initialized = FALSE;
 }
@@ -265,14 +283,9 @@ void gum_init_embedded(void) {
   glib_init();
 #endif
 
-  char name[128];
-  g_sprintf(name, "/var/jb/var/root/log/frida_log_%d", getpid());
-  log_file = fopen(name, "w+");
-  if (log_file != NULL) {
-    int fd = fileno(log_file);
-    gum_cloak_add_file_descriptor(fd);
-  }
-  g_log_set_default_handler(gum_on_log_message, log_file);
+  gum_log_init();
+
+  g_debug("debug log inited");
   gum_do_init();
 
   g_set_prgname("frida");
@@ -407,148 +420,139 @@ static void gum_libdl_prevent_unload(void) {
 static void gum_on_log_message(const gchar *log_domain,
                                GLogLevelFlags log_level, const gchar *message,
                                gpointer user_data) {
-  // #if defined (HAVE_WINDOWS)
-  //   gunichar2 * message_utf16;
+#if defined(HAVE_WINDOWS)
+  gunichar2 *message_utf16;
 
-  //   message_utf16 = g_utf8_to_utf16 (message, -1, NULL, NULL, NULL);
-  //   OutputDebugStringW (message_utf16);
-  //   g_free (message_utf16);
-  // #elif defined (HAVE_ANDROID)
-  //   int priority;
+  message_utf16 = g_utf8_to_utf16(message, -1, NULL, NULL, NULL);
+  OutputDebugStringW(message_utf16);
+  g_free(message_utf16);
+#elif defined(HAVE_ANDROID)
+  int priority;
 
-  //   switch (log_level & G_LOG_LEVEL_MASK)
-  //   {
-  //     case G_LOG_LEVEL_ERROR:
-  //     case G_LOG_LEVEL_CRITICAL:
-  //     case G_LOG_LEVEL_WARNING:
-  //       priority = ANDROID_LOG_FATAL;
-  //       break;
-  //     case G_LOG_LEVEL_MESSAGE:
-  //     case G_LOG_LEVEL_INFO:
-  //       priority = ANDROID_LOG_INFO;
-  //       break;
-  //     case G_LOG_LEVEL_DEBUG:
-  //     default:
-  //       priority = ANDROID_LOG_DEBUG;
-  //       break;
-  //   }
-
-  //   __android_log_write (priority, log_domain, message);
-  // #else
-  // # ifdef HAVE_DARWIN
-
-  //   static gsize api_value = 0;
-  //   GumCFApi * api;
-  //   if (g_once_init_enter (&api_value))
-  //   {
-  //     const gchar * cf_path = "/System/Library/Frameworks/"
-  //         "CoreFoundation.framework/CoreFoundation";
-  //     void * cf;
-
-  //     /*
-  //      * CoreFoundation must be loaded by the main thread, so we should avoid
-  //      * loading it.
-  //      */
-  //     if (gum_module_find_base_address (cf_path) != 0)
-  //     {
-  //       cf = dlopen (cf_path, RTLD_GLOBAL | RTLD_LAZY);
-  //       g_assert (cf != NULL);
-
-  //       api = g_slice_new (GumCFApi);
-
-  //       api->CFStringCreateWithCString = dlsym (cf,
-  //       "CFStringCreateWithCString"); g_assert
-  //       (api->CFStringCreateWithCString != NULL);
-
-  //       api->CFRelease = dlsym (cf, "CFRelease");
-  //       g_assert (api->CFRelease != NULL);
-
-  //       api->CFLog = dlsym (cf, "CFLog");
-  //       g_assert (api->CFLog != NULL);
-
-  //       dlclose (cf);
-
-  //       /*
-  //        * In case Foundation is also loaded, make sure it's initialized
-  //        * so CFLog() doesn't crash if called early.
-  //        */
-  //       gum_module_ensure_initialized ("/System/Library/Frameworks/"
-  //           "Foundation.framework/Foundation");
-  //        printf("api != Null\n");
-  //     }
-  //     else
-  //     {
-  //       printf("api == Null\n");
-  //       api = NULL;
-  //     }
-
-  //     g_once_init_leave (&api_value, 1 + GPOINTER_TO_SIZE (api));
-  //   }
-
-  //   api = GSIZE_TO_POINTER (api_value - 1);
-  //   if (api != NULL)
-  //   {
-  //     // printf("log to cf\n");
-  //     CFLogLevel cf_log_level;
-  //     CFStringRef message_str, template_str;
-
-  //     switch (log_level & G_LOG_LEVEL_MASK)
-  //     {
-  //       case G_LOG_LEVEL_ERROR:
-  //         cf_log_level = kCFLogLevelError;
-  //         break;
-  //       case G_LOG_LEVEL_CRITICAL:
-  //         cf_log_level = kCFLogLevelCritical;
-  //         break;
-  //       case G_LOG_LEVEL_WARNING:
-  //         cf_log_level = kCFLogLevelWarning;
-  //         break;
-  //       case G_LOG_LEVEL_MESSAGE:
-  //         cf_log_level = kCFLogLevelNotice;
-  //         break;
-  //       case G_LOG_LEVEL_INFO:
-  //         cf_log_level = kCFLogLevelInfo;
-  //         break;
-  //       case G_LOG_LEVEL_DEBUG:
-  //         cf_log_level = kCFLogLevelDebug;
-  //         break;
-  //       default:
-  //         g_assert_not_reached ();
-  //     }
-
-  //     message_str = api->CFStringCreateWithCString (NULL, message,
-  //         kCFStringEncodingUTF8);
-  //     if (log_domain != NULL)
-  //     {
-  //       CFStringRef log_domain_str;
-
-  //       template_str = api->CFStringCreateWithCString (NULL, "%@: %@",
-  //           kCFStringEncodingUTF8);
-  //       log_domain_str = api->CFStringCreateWithCString (NULL, log_domain,
-  //           kCFStringEncodingUTF8);
-  //       api->CFLog (cf_log_level, template_str, log_domain_str, message_str);
-  //       api->CFRelease (log_domain_str);
-  //     }
-  //     else
-  //     {
-  //       template_str = api->CFStringCreateWithCString (NULL, "%@",
-  //           kCFStringEncodingUTF8);
-  //       api->CFLog (cf_log_level, template_str, message_str);
-  //     }
-  //     api->CFRelease (template_str);
-  //     api->CFRelease (message_str);
-
-  //     return;
-  //   }
-  //   /* else: fall through to stdout/stderr logging */
-  // # endif
-
-  FILE *file = NULL;
-  if (user_data == NULL) {
-    return;
-  } else {
-    file = user_data;
+  switch (log_level & G_LOG_LEVEL_MASK) {
+  case G_LOG_LEVEL_ERROR:
+  case G_LOG_LEVEL_CRITICAL:
+  case G_LOG_LEVEL_WARNING:
+    priority = ANDROID_LOG_FATAL;
+    break;
+  case G_LOG_LEVEL_MESSAGE:
+  case G_LOG_LEVEL_INFO:
+    priority = ANDROID_LOG_INFO;
+    break;
+  case G_LOG_LEVEL_DEBUG:
+  default:
+    priority = ANDROID_LOG_DEBUG;
+    break;
   }
+
+  __android_log_write(priority, log_domain, message);
+#else
+  // # ifdef HAVE_DARWIN
+#if 0
+    static gsize api_value = 0;
+    GumCFApi * api;
+    if (g_once_init_enter (&api_value))
+    {
+      const gchar * cf_path = "/System/Library/Frameworks/"
+          "CoreFoundation.framework/CoreFoundation";
+      void * cf;
+
+      /*
+       * CoreFoundation must be loaded by the main thread, so we should avoid
+       * loading it.
+       */
+      if (gum_module_find_base_address (cf_path) != 0)
+      {
+        cf = dlopen (cf_path, RTLD_GLOBAL | RTLD_LAZY);
+        g_assert (cf != NULL);
+
+        api = g_slice_new (GumCFApi);
+
+        api->CFStringCreateWithCString = dlsym (cf,
+        "CFStringCreateWithCString"); g_assert
+        (api->CFStringCreateWithCString != NULL);
+
+        api->CFRelease = dlsym (cf, "CFRelease");
+        g_assert (api->CFRelease != NULL);
+
+        api->CFLog = dlsym (cf, "CFLog");
+        g_assert (api->CFLog != NULL);
+
+        dlclose (cf);
+
+        /*
+         * In case Foundation is also loaded, make sure it's initialized
+         * so CFLog() doesn't crash if called early.
+         */
+        gum_module_ensure_initialized ("/System/Library/Frameworks/"
+            "Foundation.framework/Foundation");
+      }
+      else
+      {
+        api = NULL;
+      }
+
+      g_once_init_leave (&api_value, 1 + GPOINTER_TO_SIZE (api));
+    }
+
+    api = GSIZE_TO_POINTER (api_value - 1);
+    if (api != NULL)
+    {
+      // printf("log to cf\n");
+      CFLogLevel cf_log_level;
+      CFStringRef message_str, template_str;
+
+      switch (log_level & G_LOG_LEVEL_MASK)
+      {
+        case G_LOG_LEVEL_ERROR:
+          cf_log_level = kCFLogLevelError;
+          break;
+        case G_LOG_LEVEL_CRITICAL:
+          cf_log_level = kCFLogLevelCritical;
+          break;
+        case G_LOG_LEVEL_WARNING:
+          cf_log_level = kCFLogLevelWarning;
+          break;
+        case G_LOG_LEVEL_MESSAGE:
+          cf_log_level = kCFLogLevelNotice;
+          break;
+        case G_LOG_LEVEL_INFO:
+          cf_log_level = kCFLogLevelInfo;
+          break;
+        case G_LOG_LEVEL_DEBUG:
+          cf_log_level = kCFLogLevelDebug;
+          break;
+        default:
+          g_assert_not_reached ();
+      }
+
+      message_str = api->CFStringCreateWithCString (NULL, message,
+          kCFStringEncodingUTF8);
+      if (log_domain != NULL)
+      {
+        CFStringRef log_domain_str;
+
+        template_str = api->CFStringCreateWithCString (NULL, "%@: %@",
+            kCFStringEncodingUTF8);
+        log_domain_str = api->CFStringCreateWithCString (NULL, log_domain,
+            kCFStringEncodingUTF8);
+        api->CFLog (cf_log_level, template_str, log_domain_str, message_str);
+        api->CFRelease (log_domain_str);
+      }
+      else
+      {
+        template_str = api->CFStringCreateWithCString (NULL, "%@",
+            kCFStringEncodingUTF8);
+        api->CFLog (cf_log_level, template_str, message_str);
+      }
+      api->CFRelease (template_str);
+      api->CFRelease (message_str);
+
+      return;
+    }
+    /* else: fall through to stdout/stderr logging */
+#endif
+
   const gchar *severity = NULL;
 
   switch (log_level & G_LOG_LEVEL_MASK) {
@@ -580,9 +584,12 @@ static void gum_on_log_message(const gchar *log_domain,
     g_assert_not_reached();
   }
 
-  fprintf(file, "[%s %s] %s\n", log_domain, severity, message);
-  fflush(file);
-  // #endif
+  char buffer[512];
+  g_snprintf(buffer, 512, "[%s %s] %s\n", log_domain, severity, message);
+  g_io_channel_write_chars(log_file, buffer, -1, NULL, NULL);
+
+  // fflush(file);
+#endif
 }
 
 #ifdef GUM_DIET

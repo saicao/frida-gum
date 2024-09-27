@@ -12,7 +12,7 @@
 #include "gumquickeventsink.h"
 #include "gumquickmacros.h"
 #include "gumstalker.h"
-#include "gumisralkeritransformer.h"
+
 
 #include <string.h>
 
@@ -95,7 +95,7 @@ GUMJS_DECLARE_FUNCTION (gumjs_stalker_flush)
 GUMJS_DECLARE_FUNCTION (gumjs_stalker_garbage_collect)
 GUMJS_DECLARE_FUNCTION (gumjs_stalker_exclude)
 GUMJS_DECLARE_FUNCTION (gumjs_stalker_follow)
-GUMJS_DECLARE_FUNCTION (gumjs_istalker_follow)
+GUMJS_DECLARE_FUNCTION (gumjs_stalker_followi)
 GUMJS_DECLARE_FUNCTION (gumjs_stalker_unfollow)
 GUMJS_DECLARE_FUNCTION (gumjs_stalker_invalidate)
 GUMJS_DECLARE_FUNCTION (gumjs_stalker_add_call_probe)
@@ -186,6 +186,7 @@ static const JSCFunctionListEntry gumjs_stalker_entries[] =
   JS_CFUNC_DEF ("garbageCollect", 0, gumjs_stalker_garbage_collect),
   JS_CFUNC_DEF ("_exclude", 0, gumjs_stalker_exclude),
   JS_CFUNC_DEF ("_follow", 0, gumjs_stalker_follow),
+  JS_CFUNC_DEF ("_followi", 0, gumjs_stalker_followi),
   JS_CFUNC_DEF ("unfollow", 0, gumjs_stalker_unfollow),
   JS_CFUNC_DEF ("invalidate", 0, gumjs_stalker_invalidate),
   JS_CFUNC_DEF ("addCallProbe", 0, gumjs_stalker_add_call_probe),
@@ -587,33 +588,30 @@ GUMJS_DEFINE_FUNCTION (gumjs_stalker_follow)
   return JS_UNDEFINED;
 }
 
-GUMJS_DEFINE_FUNCTION (gumjs_istalker_follow)
+GUMJS_DEFINE_FUNCTION (gumjs_stalker_followi)
 {
   GumQuickStalker * parent;
   GumStalker * stalker;
   GumThreadId thread_id;
   // GumQuickEventSinkOptions so;
-  gpointer user_data;
   GumStalkerTransformer * transformer;
   GumEventSink * sink=NULL;
-
+   gsize size;
   parent = gumjs_get_parent_module (core);
   stalker = _gum_quick_stalker_get (parent);
-  gsize size=gum_query_page_size()*4;
+  
   // so.core = core;
   // so.main_context = gum_script_scheduler_get_js_context (core->scheduler);
   // so.queue_capacity = parent->queue_capacity;
   // so.queue_drain_interval = parent->queue_drain_interval;
 
-  if (!_gum_quick_args_parse (args, "Z", &thread_id))
+  if (!_gum_quick_args_parse (args, "ZZ", &thread_id,&size))
     return JS_EXCEPTION;
-  
-  
+ 
   GumStalkerItransformer *itransformer=g_object_new(GUM_TYPE_STALKER_ITRANSFORMER,NULL);
   transformer=GUM_STALKER_TRANSFORMER(itransformer);
  
-  void *buf = gum_alloc_n_pages (4, GUM_PAGE_RW);
-  gum_stalker_itransformer_set_buf(itransformer,buf,size);
+  gum_stalker_itransformer_set_buf(itransformer,size);
 
   if (thread_id == gum_process_get_current_thread_id ())
   {

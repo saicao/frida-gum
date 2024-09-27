@@ -26,6 +26,7 @@ G_BEGIN_DECLS
 #define IMSG_POST_INSTR 7
 #define VREG_FREE -1
 #define VREG_USED -2
+#define VREG_TEMP -3
 #define VREG_TRANSFROM 0
 #define REG_TRANSFROMER(tm) tm->vir_regs[VREG_TRANSFROM]
 #define VREG_INVALID -1
@@ -40,7 +41,7 @@ typedef struct _ImsgBlockExec ImsgBlockExec;
 typedef struct _ImsgContext ImsgContext;
 typedef struct _ImsgHeader ImsgHeader;
 #define GUM_TYPE_STALKER_ITRANSFORMER \
-    (gum_default_stalker_transformer_get_type ())
+    (gum_stalker_itransformer_get_type ())
 
 GUM_DECLARE_FINAL_TYPE (GumStalkerItransformer,
                         gum_stalker_itransformer,
@@ -69,6 +70,7 @@ struct _ImsgContext {
   guint64 fpsr;
 };
 
+
 enum _ITraceState {
   ITRACE_STATE_CREATED,
   ITRACE_STATE_STARTING,
@@ -81,7 +83,7 @@ struct _ImsgRegSpec {
   guint32 reg_id;
 };
 void gum_stalker_itransformer_set_buf(GumStalkerItransformer *tm,
-                                         gpointer buf, gsize size);
+                                       gsize size);
 
 G_END_DECLS
 #endif

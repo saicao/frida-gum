@@ -22,6 +22,7 @@ endif
 
 if quickjs_dep.found()
   gumjs_sources += [
+    'gumistralkeritransformer.c',
     'gumquickscriptbackend.c',
     'gumquickscript.c',
     'gumquickbundle.c',
