@@ -1719,8 +1719,10 @@ gum_exec_ctx_new (GumStalker * stalker,
   gum_thumb_relocator_set_it_branch_type (&ctx->thumb_relocator,
       GUM_IT_BRANCH_LONG);
 
-  if (transformer != NULL)
+  if (transformer != NULL){
     ctx->transformer = g_object_ref (transformer);
+    g_debug("Using custom transformer");
+  }
   else
     ctx->transformer = gum_stalker_transformer_make_default ();
   ctx->transform_block_impl =

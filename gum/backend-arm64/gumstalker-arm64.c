@@ -805,17 +805,17 @@ static void gum_dump_exec_block(csh capstone,GumExecBlock * block)
   
   count=cs_disasm(capstone ,code, size,code, 0, &insn);
   for(gsize i=0;i<count;i++){
-    g_debug("%llx:%s %s\n",insn[i].address,insn[i].mnemonic,insn[i].op_str);
+    g_debug("%llx:%s %s",insn[i].address,insn[i].mnemonic,insn[i].op_str);
   }
   cs_free( insn, count);
 
   cs_option(capstone, CS_OPT_SKIPDATA, CS_OPT_ON);
   code=block->code_start;
   size=block->code_size;
-  g_debug("=======================");
+  g_debug("=======tranlate code=======");
   count=cs_disasm(capstone ,code, size,code, 0, &insn);
   for(gsize i=0;i<count;i++){
-    g_debug("%llx:%s %s\n",insn[i].address,insn[i].mnemonic,insn[i].op_str);
+    g_debug("%llx:%s %s",insn[i].address,insn[i].mnemonic,insn[i].op_str);
   }
   cs_free( insn, count);
   cs_option(capstone, CS_OPT_SKIPDATA, CS_OPT_OFF);
@@ -2154,8 +2154,10 @@ gum_exec_ctx_new (GumStalker * stalker,
   gum_arm64_writer_init (&ctx->slow_writer, NULL);
   gum_arm64_relocator_init (&ctx->relocator, NULL, &ctx->code_writer);
 
-  if (transformer != NULL)
+  if (transformer != NULL){
     ctx->transformer = g_object_ref (transformer);
+    g_debug("transformer is not null");
+  }
   else
     ctx->transformer = gum_stalker_transformer_make_default ();
   ctx->transform_block_impl =
@@ -2613,12 +2615,6 @@ gum_exec_ctx_obtain_block_for (GumExecCtx * ctx,
   }
 
   *code_address = block->code_start;
-  
-  
-  
-  
-  // g_abort();
-
   gum_dump_exec_block(ctx->relocator.capstone,block);
   return block;
 }

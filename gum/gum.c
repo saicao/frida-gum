@@ -154,8 +154,15 @@ static void gum_log_init(void) {
   }
 #endif
   g_log_set_debug_enabled(true);
-  g_log_set_default_handler(gum_on_log_message, log_file);
+  g_log_set_default_handler(gum_on_log_message, NULL);
   g_debug("log inited");
+};
+static void gum_log_deinit(void) {
+  g_debug("log deinit");
+  g_log_set_default_handler(NULL, NULL);
+  g_io_channel_shutdown(log_file, TRUE, NULL);
+  g_io_channel_unref(log_file);
+  log_file = NULL;
 };
 void gum_shutdown(void) {
   g_slist_foreach(gum_early_destructors, (GFunc)gum_destructor_invoke, NULL);
@@ -285,7 +292,6 @@ void gum_init_embedded(void) {
 
   gum_log_init();
 
-  g_debug("debug log inited");
   gum_do_init();
 
   g_set_prgname("frida");
@@ -300,11 +306,12 @@ void gum_init_embedded(void) {
 void gum_deinit_embedded(void) {
   g_assert(gum_initialized);
 
+  
+
   gum_shutdown();
 #ifdef HAVE_FRIDA_GLIB
   glib_shutdown();
 #endif
-
   gum_clear_object(&gum_cached_interceptor);
 
   gum_deinit();
@@ -586,6 +593,7 @@ static void gum_on_log_message(const gchar *log_domain,
 
   char buffer[512];
   g_snprintf(buffer, 512, "[%s %s] %s\n", log_domain, severity, message);
+  // g_printf("%s", buffer);
   g_io_channel_write_chars(log_file, buffer, -1, NULL, NULL);
 
   // fflush(file);

@@ -1,5 +1,4 @@
 gnome = import('gnome')
-
 gum_headers = [
   'gum.h',
   'gumapiresolver.h',
@@ -108,6 +107,22 @@ else
 endif
 
 if host_os_family == 'darwin'
+  # gum_darwin_oc = library(
+  #   'gum_darwin_oc',
+  #   ['backend-darwin/gum_darwin_oc/gumdarwinfile.c'],
+  #   include_directories: ['backend-darwin/gum_darwin_oc'],
+  #   dependencies: [glib_dep],
+  #   link_args: ['-framework', 'CoreFoundation']
+  # )
+
+  gum_darwin_oc_dep = declare_dependency(
+    include_directories: include_directories('backend-darwin/gum_darwin_oc'),
+    sources: ['backend-darwin/gum_darwin_oc/gumdarwinfile.c'],
+    # dependencies: [glib_dep],
+    link_args: ['-framework', 'CoreFoundation']
+  )
+  
+  
   gum_backend_headers += [
     'backend-darwin/gumdarwin.h',
     'backend-darwin/gumdarwinbacktracer.h',
@@ -129,6 +144,7 @@ if host_os_family == 'darwin'
     'backend-darwin/gumdarwinmapper.c',
     'backend-darwin/gumdarwinmoduleresolver.c',
   ]
+
   if host_os in ['macos', 'ios', 'tvos']
     if have_jailbreak
       gum_sources += [
@@ -313,7 +329,8 @@ install_headers(gum_arm_headers, subdir: install_header_subdir + '/arch-arm')
 install_headers(gum_arm64_headers, subdir: install_header_subdir + '/arch-arm64')
 install_headers(gum_mips_headers, subdir: install_header_subdir + '/arch-mips')
 
-gum_enums = gnome.mkenums('gum-enum-types',
+gum_enums = gnome.mkenums(
+  'gum-enum-types',
   sources: gum_headers,
   c_template: 'gumenumtypes.c.template',
   h_template: 'gumenumtypes.h.template',
@@ -332,8 +349,13 @@ endif
 if ffi_dep.found()
   gum_internal_deps += ffi_dep
 endif
-
-gum = library('frida-gum-' + api_version, gum_sources + gum_enums,
+if host_os_family == 'darwin'
+  # gum_public_deps += gum_darwin_oc_dep
+  gum_internal_deps += gum_darwin_oc_dep
+endif
+gum = library(
+  'frida-gum-' + api_version,
+  gum_sources + gum_enums,
   c_args: frida_component_cflags,
   include_directories: gum_incdirs,
   link_args: extra_libs_private,
@@ -347,7 +369,8 @@ if gir.found()
     '-DGUM_GIR_COMPILATION',
   ]
 
-  gnome.generate_gir(gum,
+  gnome.generate_gir(
+    gum,
     sources: gum_sources + gum_headers + [gum_enum_h],
     namespace: 'Gum',
     nsversion: api_version,
@@ -361,7 +384,8 @@ if gir.found()
   )
 endif
 
-gum_dep = declare_dependency(link_with: gum,
+gum_dep = declare_dependency(
+  link_with: gum,
   include_directories: gum_incdirs,
   compile_args: extra_cflags,
   link_args: extra_libs_private,
@@ -369,7 +393,8 @@ gum_dep = declare_dependency(link_with: gum,
 )
 
 pkg = import('pkgconfig')
-pkg.generate(gum,
+pkg.generate(
+  gum,
   filebase: 'frida-gum-' + api_version,
   name: 'Gum',
   version: gum_version,

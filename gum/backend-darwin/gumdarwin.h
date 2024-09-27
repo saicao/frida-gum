@@ -15,7 +15,6 @@
 #include "gumdarwinsymbolicator.h"
 #include "gummemory.h"
 #include "gumprocess.h"
-
 #include <TargetConditionals.h>
 #include <mach/mach.h>
 #include <sys/param.h>
