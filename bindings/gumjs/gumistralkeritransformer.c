@@ -24,7 +24,7 @@ struct _GumStalkerItransformer {
   gpointer buf;
   gpointer buf_offset;
   gsize buf_size;
-  guint64 event_id;
+  guint64 dump_counter;
   ITraceState state;
   GumStalkerIterator *iterator;
   GumArm64Writer *cw;
@@ -54,7 +54,7 @@ static void gum_stalker_itransformer_init(GumStalkerItransformer *self) {
   self->buf = NULL;
   self->buf_offset = NULL;
   self->buf_size = 0;
-  self->event_id = 0;
+  self->dump_counter = 0;
   self->state = ITRACE_STATE_CREATED;
   self->iterator = NULL;
   self->cw = NULL;
@@ -68,7 +68,7 @@ static void gum_stalker_itransformer_init(GumStalkerItransformer *self) {
   self->reg_val_offset = 0;
   self->modules = NULL;
   self->dump_context = TRUE;
-  self->context_interval = 0;
+  self->context_interval = 1;
   self->exceptor = gum_exceptor_obtain();
 
 
@@ -77,7 +77,7 @@ static void gum_stalker_itransformer_init(GumStalkerItransformer *self) {
 gboolean file_write();
 gboolean gum_try_do_sink(GumExceptionDetails *details,
                          GumStalkerItransformer *self) {
-  
+  g_log(G_LOG_DOMAIN,G_LOG_LEVEL_DEBUG|G_LOG_FLAG_RECURSION,"gum_try_do_sink");
   if (details->type != GUM_EXCEPTION_ACCESS_VIOLATION) {
     return false;
   }
@@ -116,13 +116,12 @@ void gum_stalker_itransformer_set_buf(GumStalkerItransformer *self,
     g_abort();
   }
   guint64 *gurad_page = buf + n_page * page_size;
-  *gurad_page = GURAD_MAGIC;
   self->buf = buf;
   self->buf_offset = buf;
   self->buf_size = size;
   gum_mprotect(gurad_page, page_size, GUM_PAGE_READ);
   self->guard_page_addr = (GumAddress)gurad_page;
-  gum_exceptor_add(self->exceptor, gum_try_do_sink, self);
+  // gum_exceptor_add(self->exceptor, gum_try_do_sink, self);
 };
 
 static void gum_stalker_itransformer_dispose(GumStalkerItransformer *self) {
@@ -179,11 +178,6 @@ aarch64_reg allocate_tmp_reg(GumStalkerItransformer *tm) {
       tm->reg_used[i] = VREG_USED;
       aarch64_reg reg = SCRATCH_REG_BOTTOM + i;
       save_register(tm->cw, REG_TRANSFROMER(tm), reg);
-      // gum_arm64_writer_put_str_reg_reg_offset(tm->cw, reg,
-      //                                        REG_TRANSFROMER(tm),
-      //                                        G_STRUCT_OFFSET(GumStalkerItransformer,
-      //                                        saved_regs) +
-      //                                            SCRATCH_REG_OFFSET(reg));
       g_debug("allocate tmp register %s", cs_reg_name(tm->capstone, reg));
 
       return reg;
@@ -420,13 +414,15 @@ itransformer_try_write_context(GumStalkerItransformer *self,
   g_debug("write context");
   aarch64_reg value_reg = allocate_tmp_reg(self);
   // it should always be x28,x27.
-
+  
   gum_arm64_writer_put_ldr_reg_reg_offset(
-      cw, value_reg, tm_reg, G_STRUCT_OFFSET(GumStalkerItransformer, event_id));
+      cw, value_reg, tm_reg, G_STRUCT_OFFSET(GumStalkerItransformer, dump_counter));
 
   gum_arm64_writer_put_sub_reg_reg_imm(cw, value_reg, value_reg, 1);
+  
   gum_arm64_writer_put_str_reg_reg_offset(
-      cw, value_reg, tm_reg, G_STRUCT_OFFSET(GumStalkerItransformer, event_id));
+      cw, value_reg, tm_reg, G_STRUCT_OFFSET(GumStalkerItransformer, dump_counter));
+  
   gum_arm64_writer_put_cbnz_reg_label(cw, value_reg, not_write_label);
 
   gum_stalker_iterator_put_callout(iterator, on_block_ctx, self, NULL);
@@ -570,13 +566,11 @@ static void on_block_ctx(GumCpuContext *cpu_context,
   ImsgContext *ctx = (ImsgContext *)(tm->buf_offset);
   ctx->type = IMSG_MSG_CONTEXT;
   memcpy(&ctx->cpu_context, cpu_context, sizeof(GumCpuContext));
-  tm->event_id = tm->context_interval;
+  tm->dump_counter = tm->context_interval;
   ctx->cpu_context.x[28] = tm->saved_regs[SCRATCH_REG_INDEX(SCRATCH_REG_TOP)];
   ctx->cpu_context.x[27] =
       tm->saved_regs[SCRATCH_REG_INDEX(SCRATCH_REG_TOP - 1)];
-  // memcpy(,
-  //        tm->saved_regs, sizeof(tm->saved_regs));
-  // tm->buf_offset += sizeof(ImsgContext);
+  
   dump_imsg_context(ctx);
 };
 
@@ -727,7 +721,8 @@ static void dump_imsg_context(const ImsgContext *context) {
   g_debug("  x26: 0x%016" G_GINT64_MODIFIER "x", context->cpu_context.x[26]);
   g_debug("  x27: 0x%016" G_GINT64_MODIFIER "x", context->cpu_context.x[27]);
   g_debug("  x28: 0x%016" G_GINT64_MODIFIER "x", context->cpu_context.x[28]);
-  g_debug("  x29: 0x%016" G_GINT64_MODIFIER "x", context->cpu_context.lr);
+  g_debug("  fp: 0x%016" G_GINT64_MODIFIER "x", context->cpu_context.fp);
+  g_debug("  lr: 0x%016" G_GINT64_MODIFIER "x", context->cpu_context.lr);
   g_debug("  sp: 0x%016" G_GINT64_MODIFIER "x", context->cpu_context.sp);
   g_debug("  nzcv: 0x%016" G_GINT64_MODIFIER "x", context->cpu_context.nzcv);
   g_debug("  pc: 0x%016" G_GINT64_MODIFIER "x", context->cpu_context.pc);

@@ -9,6 +9,7 @@
 
 #include "gio/gio.h"
 #include "glib/gprintf.h"
+#include "glib/gstdio.h"
 #include "gum-init.h"
 #include "gumexceptorbackend.h"
 #include "guminterceptor-priv.h"
@@ -16,6 +17,7 @@
 #include "gumprintf.h"
 #include "gumtls-priv.h"
 #include "valgrind.h"
+#include <unistd.h>
 #ifdef HAVE_I386
 #ifdef _MSC_VER
 #include <intrin.h>
@@ -39,6 +41,7 @@
 
 #define DEBUG_HEAP_LEAKS 0
 
+#define GUM_HOME_DIR "/private/itrace"
 typedef struct _GumInternalThreadDetails GumInternalThreadDetails;
 
 struct _GumInternalThreadDetails {
@@ -137,25 +140,36 @@ void gum_init(void) {
   if (gum_initialized)
     return;
   gum_initialized = TRUE;
-
   gum_internal_heap_ref();
   gum_do_init();
 }
 static void gum_log_init(void) {
-  char name[128];
 
 #ifdef HAVE_DARWIN
-  if (gum_darwin_sandbox_check()) {
-    g_sprintf(name, "itrace_log_%d", getpid());
-    log_file = gum_darwin_open_in_cache(name, "w+");
-  } else {
-    g_sprintf(name, "/var/jb/var/root/log/itrace_log_%d", getpid());
-    log_file = gum_darwin_open(name, "w+");
+  // gum_darwin_vfs_init();
+  // 说不定要写到Caches 对于IOS 设备
+  const gchar *tmp = g_get_tmp_dir();
+  GString *path = g_string_new(tmp);
+  // g_string_append(path, "frida");
+  g_string_append_printf(path, "/frida/%d", getpid());
+  int err=g_mkdir_with_parents(path->str, 0777);
+  if(err!=0){
+    g_printerr("Error creating dir: %s\n", path->str);
+  };
+  
+  
+  GError *error = NULL;
+  g_string_append_printf(path, "/frida_log_%llx.log", g_get_real_time());
+  log_file = g_io_channel_new_file(path->str, "w+", &error);
+  if (error != NULL) {
+    g_printerr("Error opening file: %s\n", error->message);
+    g_error_free(error);
   }
+  g_string_free(path, TRUE);
 #endif
   g_log_set_debug_enabled(true);
   g_log_set_default_handler(gum_on_log_message, NULL);
-  g_debug("log inited");
+  g_debug("log init");
 };
 static void gum_log_deinit(void) {
   g_debug("log deinit");
@@ -172,7 +186,7 @@ void gum_shutdown(void) {
 
 void gum_deinit(void) {
   g_assert(gum_initialized);
-
+  gum_log_deinit();
   gum_shutdown();
 
   _gum_tls_deinit();
@@ -305,8 +319,6 @@ void gum_init_embedded(void) {
 
 void gum_deinit_embedded(void) {
   g_assert(gum_initialized);
-
-  
 
   gum_shutdown();
 #ifdef HAVE_FRIDA_GLIB
@@ -591,12 +603,12 @@ static void gum_on_log_message(const gchar *log_domain,
     g_assert_not_reached();
   }
 
-  char buffer[512];
-  g_snprintf(buffer, 512, "[%s %s] %s\n", log_domain, severity, message);
-  // g_printf("%s", buffer);
-  g_io_channel_write_chars(log_file, buffer, -1, NULL, NULL);
+  // char buffer[512];
+  // g_snprintf(buffer, 512, "[%s %s] %s\n", log_domain, severity, message);
+  // // g_printf("%s", buffer);
+  // g_io_channel_write_chars(log_file, buffer, -1, NULL, NULL);
+  // g_io_channel_flush(log_file, NULL);
 
-  // fflush(file);
 #endif
 }
 
