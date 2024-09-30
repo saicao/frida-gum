@@ -603,11 +603,11 @@ static void gum_on_log_message(const gchar *log_domain,
     g_assert_not_reached();
   }
 
-  // char buffer[512];
-  // g_snprintf(buffer, 512, "[%s %s] %s\n", log_domain, severity, message);
-  // // g_printf("%s", buffer);
-  // g_io_channel_write_chars(log_file, buffer, -1, NULL, NULL);
-  // g_io_channel_flush(log_file, NULL);
+  char buffer[512];
+  g_snprintf(buffer, 512, "[%s %s] %s\n", log_domain, severity, message);
+  // g_printf("%s", buffer);
+  g_io_channel_write_chars(log_file, buffer, -1, NULL, NULL);
+  g_io_channel_flush(log_file, NULL);
 
 #endif
 }

@@ -27,6 +27,7 @@ G_BEGIN_DECLS
 #define VREG_FREE -1
 #define VREG_USED -2
 #define VREG_TEMP -3
+#define VREG_REALLOC -4
 #define VREG_TRANSFROM 0
 #define REG_TRANSFROMER(tm) tm->vir_regs[VREG_TRANSFROM]
 #define VREG_INVALID -1

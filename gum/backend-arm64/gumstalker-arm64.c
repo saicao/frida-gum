@@ -2615,7 +2615,7 @@ gum_exec_ctx_obtain_block_for (GumExecCtx * ctx,
   }
 
   *code_address = block->code_start;
-  // gum_dump_exec_block(ctx->relocator.capstone,block);
+  gum_dump_exec_block(ctx->relocator.capstone,block);
   return block;
 }
 
@@ -3162,6 +3162,7 @@ gum_exec_ctx_write_prolog (GumExecCtx * ctx,
   helper = (type == GUM_PROLOG_MINIMAL)
       ? ctx->last_prolog_minimal
       : ctx->last_prolog_full;
+  helper=ctx->last_prolog_full;
 
   gum_arm64_writer_put_stp_reg_reg_reg_offset (cw, AArch64_REG_X19,
       AArch64_REG_LR, AArch64_REG_SP, -(16 + GUM_RED_ZONE_SIZE),
@@ -5697,7 +5698,7 @@ gum_exec_block_open_prolog (GumExecBlock * block,
   /* We don't want to handle this case for performance reasons */
   g_assert (gc->opened_prolog == GUM_PROLOG_NONE);
 
-  gc->opened_prolog = type;
+  gc->opened_prolog = GUM_PROLOG_FULL;
   
   gum_exec_ctx_write_prolog (block->ctx, type, cw);
 }
