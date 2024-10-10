@@ -599,7 +599,6 @@ GUMJS_DEFINE_FUNCTION (gumjs_stalker_followi)
    gsize size;
   parent = gumjs_get_parent_module (core);
   stalker = _gum_quick_stalker_get (parent);
-  
   // so.core = core;
   // so.main_context = gum_script_scheduler_get_js_context (core->scheduler);
   // so.queue_capacity = parent->queue_capacity;
@@ -607,11 +606,34 @@ GUMJS_DEFINE_FUNCTION (gumjs_stalker_followi)
 
   if (!_gum_quick_args_parse (args, "ZZ", &thread_id,&size))
     return JS_EXCEPTION;
+
+
  
   GumStalkerItransformer *itransformer=g_object_new(GUM_TYPE_STALKER_ITRANSFORMER,NULL);
   transformer=GUM_STALKER_TRANSFORMER(itransformer);
- 
+  const gchar* home=gum_get_home_path();
+  gchar* path=g_strdup_printf("%s/btrace",home);
+  GError *error=NULL;
+  GFile* file=g_file_new_for_path(path);
+  GFileOutputStream * btrace=g_file_replace(file,NULL,FALSE,G_FILE_CREATE_NONE,NULL,&error);
+  if(error!=NULL){
+    g_warning("open file error:%s",error->message);
+    g_error_free(error);
+    return JS_EXCEPTION;
+  }
+  g_object_unref(file);
+  g_free(path);
+  path=g_strdup_printf("%s/etrace",home);
+  file=g_file_new_for_path(path);
+  GFileOutputStream * etrace=g_file_replace(file,NULL,FALSE,G_FILE_CREATE_NONE,NULL,&error);
+  if(error!=NULL){
+    g_warning("open file error:%s",error->message);
+    g_error_free(error);
+    return JS_EXCEPTION;
+  }
   gum_stalker_itransformer_set_buf(itransformer,size);
+  gum_stalker_itransformer_sink_channel(itransformer,G_OUTPUT_STREAM(btrace),G_OUTPUT_STREAM(etrace));
+  
 
   if (thread_id == gum_process_get_current_thread_id ())
   {

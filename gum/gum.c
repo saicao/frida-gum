@@ -7,10 +7,11 @@
 
 #include "gum.h"
 
-#include "gio/gio.h"
+
 #include "glib/gprintf.h"
 #include "glib/gstdio.h"
 #include "gum-init.h"
+
 #include "gumexceptorbackend.h"
 #include "guminterceptor-priv.h"
 #include "gummemory-priv.h"
@@ -18,6 +19,7 @@
 #include "gumtls-priv.h"
 #include "valgrind.h"
 #include <unistd.h>
+#include <gio/gio.h>
 #ifdef HAVE_I386
 #ifdef _MSC_VER
 #include <intrin.h>
@@ -40,8 +42,6 @@
 #endif
 
 #define DEBUG_HEAP_LEAKS 0
-
-#define GUM_HOME_DIR "/private/itrace"
 typedef struct _GumInternalThreadDetails GumInternalThreadDetails;
 
 struct _GumInternalThreadDetails {
@@ -129,7 +129,8 @@ static GPrivate gum_internal_thread_details_key =
 #endif
 
 static GumInterceptor *gum_cached_interceptor = NULL;
-static GIOChannel *log_file = NULL;
+static GOutputStream *log_stream = NULL;
+static GString *gum_home_path = NULL;
 
 G_DEFINE_QUARK(gum - error - quark, gum_error)
 
@@ -148,35 +149,36 @@ static void gum_log_init(void) {
 #ifdef HAVE_DARWIN
   // gum_darwin_vfs_init();
   // 说不定要写到Caches 对于IOS 设备
-  const gchar *tmp = g_get_tmp_dir();
-  GString *path = g_string_new(tmp);
+  GString *path = g_string_new(gum_home_path->str);
   // g_string_append(path, "frida");
-  g_string_append_printf(path, "/frida/%d", getpid());
-  int err=g_mkdir_with_parents(path->str, 0777);
-  if(err!=0){
-    g_printerr("Error creating dir: %s\n", path->str);
-  };
-  
-  
   GError *error = NULL;
   g_string_append_printf(path, "/frida_log_%llx.log", g_get_real_time());
-  log_file = g_io_channel_new_file(path->str, "w+", &error);
+  // log_file = g_file_new_for_path(path->str);
+  GFile *file = g_file_new_for_path(path->str);
+  GFileOutputStream *output_stream =
+      g_file_replace(file, NULL, FALSE, G_FILE_CREATE_NONE, NULL, &error);
+  g_object_unref(file);
   if (error != NULL) {
     g_printerr("Error opening file: %s\n", error->message);
     g_error_free(error);
+    g_object_unref(file);
+    g_abort();
   }
-  g_string_free(path, TRUE);
+  log_stream = G_OUTPUT_STREAM(output_stream);
+  g_string_free(path, true);
+
 #endif
-  g_log_set_debug_enabled(true);
+  // g_log_set_debug_enabled(true);
   g_log_set_default_handler(gum_on_log_message, NULL);
+  g_log_writer_default_set_use_stderr(FALSE);
   g_debug("log init");
 };
 static void gum_log_deinit(void) {
   g_debug("log deinit");
   g_log_set_default_handler(NULL, NULL);
-  g_io_channel_shutdown(log_file, TRUE, NULL);
-  g_io_channel_unref(log_file);
-  log_file = NULL;
+  g_output_stream_close(log_stream, NULL, NULL);
+  log_stream = NULL;
+  g_object_unref(log_stream);
 };
 void gum_shutdown(void) {
   g_slist_foreach(gum_early_destructors, (GFunc)gum_destructor_invoke, NULL);
@@ -196,9 +198,6 @@ void gum_deinit(void) {
   gum_final_destructors = NULL;
 
   _gum_interceptor_deinit();
-
-  g_io_channel_shutdown(log_file, TRUE, NULL);
-  g_io_channel_unref(log_file);
 
   gum_initialized = FALSE;
 }
@@ -303,6 +302,14 @@ void gum_init_embedded(void) {
 #ifdef HAVE_FRIDA_GLIB
   glib_init();
 #endif
+  const gchar *tmp = g_get_tmp_dir();
+  gum_home_path = g_string_new(tmp);
+  // g_string_append(path, "frida");
+  g_string_append_printf(gum_home_path, "/frida/%d", getpid());
+  int err = g_mkdir_with_parents(gum_home_path->str, 0777);
+  if (err != 0) {
+    g_printerr("Error creating dir: %s\n", gum_home_path->str);
+  };
 
   gum_log_init();
 
@@ -347,7 +354,7 @@ void gum_recover_from_fork_in_parent(void) {
 void gum_recover_from_fork_in_child(void) {
   _gum_exceptor_backend_recover_from_fork_in_child();
 }
-
+const gchar *gum_get_home_path() { return gum_home_path->str; }
 #if !defined(GUM_USE_SYSTEM_ALLOC) && defined(HAVE_FRIDA_LIBFFI)
 
 static void gum_on_ffi_allocate(void *base_address, size_t size) {
@@ -604,11 +611,13 @@ static void gum_on_log_message(const gchar *log_domain,
   }
 
   char buffer[512];
-  g_snprintf(buffer, 512, "[%s %s] %s\n", log_domain, severity, message);
+  guint len =
+      g_snprintf(buffer, 512, "[%s %s] %s\n", log_domain, severity, message);
   // g_printf("%s", buffer);
-  g_io_channel_write_chars(log_file, buffer, -1, NULL, NULL);
-  g_io_channel_flush(log_file, NULL);
+  GError *error = NULL;
 
+  g_output_stream_write_all(log_stream, buffer, len, NULL, NULL, &error);
+  g_output_stream_flush(log_stream, NULL, NULL);
 #endif
 }
 

@@ -115,12 +115,12 @@ if host_os_family == 'darwin'
   #   link_args: ['-framework', 'CoreFoundation']
   # )
 
-  gum_darwin_oc_dep = declare_dependency(
-    include_directories: include_directories('backend-darwin/gum_darwin_oc'),
-    sources: ['backend-darwin/gum_darwin_oc/gumdarwinfile.c'],
-    # dependencies: [glib_dep],
-    link_args: ['-framework', 'CoreFoundation']
-  )
+  # gum_darwin_oc_dep = declare_dependency(
+  #   include_directories: include_directories('backend-darwin/gum_darwin_oc'),
+  #   sources: ['backend-darwin/gum_darwin_oc/gumdarwinfile.c'],
+  #   # dependencies: [glib_dep],
+  #   link_args: ['-framework', 'CoreFoundation']
+  # )
   
   
   gum_backend_headers += [
@@ -340,8 +340,8 @@ gum_enums = gnome.mkenums(
 gum_enum_h = gum_enums[1]
 gum_enums_dep = declare_dependency(sources: [gum_enum_h])
 
-gum_public_deps = [glib_dep, capstone_dep, gum_enums_dep]
-gum_internal_deps = [glib_dep, capstone_dep, threads_dep]
+gum_public_deps = [glib_dep, gio_dep,capstone_dep, gum_enums_dep]
+gum_internal_deps = [glib_dep,gio_dep ,capstone_dep, threads_dep]
 if not diet
   gum_public_deps += gobject_dep
   gum_internal_deps += gobject_dep
@@ -350,8 +350,8 @@ if ffi_dep.found()
   gum_internal_deps += ffi_dep
 endif
 if host_os_family == 'darwin'
-  # gum_public_deps += gum_darwin_oc_dep
-  gum_internal_deps += gum_darwin_oc_dep
+  # gum_public_deps += gum_darwin_oc_deps
+  # gum_internal_deps += gum_darwin_oc_dep
 endif
 gum = library(
   'frida-gum-' + api_version,

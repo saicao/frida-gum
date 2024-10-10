@@ -48,7 +48,7 @@
 #define GUM_INVALIDATE_TRAMPOLINE_MAX_SIZE 40
 #define GUM_RESTORATION_PROLOG_SIZE        4
 #define GUM_EXCLUSIVE_ACCESS_MAX_DEPTH     8
-
+#define GUM_MINIMAL_QREG_SIZE              14
 #define GUM_IC_MAGIC_EMPTY                 0xbaadd00ddeadface
 
 #define GUM_INSTRUCTION_OFFSET_NONE (-1)
@@ -2615,7 +2615,7 @@ gum_exec_ctx_obtain_block_for (GumExecCtx * ctx,
   }
 
   *code_address = block->code_start;
-  gum_dump_exec_block(ctx->relocator.capstone,block);
+  //gum_dump_exec_block(ctx->relocator.capstone,block);
   return block;
 }
 
@@ -3162,7 +3162,6 @@ gum_exec_ctx_write_prolog (GumExecCtx * ctx,
   helper = (type == GUM_PROLOG_MINIMAL)
       ? ctx->last_prolog_minimal
       : ctx->last_prolog_full;
-  helper=ctx->last_prolog_full;
 
   gum_arm64_writer_put_stp_reg_reg_reg_offset (cw, AArch64_REG_X19,
       AArch64_REG_LR, AArch64_REG_SP, -(16 + GUM_RED_ZONE_SIZE),
@@ -3288,13 +3287,14 @@ gum_exec_ctx_write_prolog_helper (GumExecCtx * ctx,
 
   if (type == GUM_PROLOG_MINIMAL)
   {
+    
     /* GumCpuContext.v[0:8] plus padding for v[8:32] */
-    for (i = 6; i != -2; i -= 2)
+    for (i = GUM_MINIMAL_QREG_SIZE-2; i != -2; i -= 2)
     {
       gssize size = 2 * sizeof (GumArm64VectorReg);
 
-      if (i == 6)
-        size += (32 - 8) * sizeof (GumArm64VectorReg);
+      if (i == (GUM_MINIMAL_QREG_SIZE-2))
+        size += (32 - GUM_MINIMAL_QREG_SIZE) * sizeof (GumArm64VectorReg);
 
       gum_arm64_writer_put_stp_reg_reg_reg_offset (cw,
           AArch64_REG_Q0 + i, AArch64_REG_Q1 + i,
@@ -3472,12 +3472,12 @@ gum_exec_ctx_write_epilog_helper (GumExecCtx * ctx,
         AArch64_REG_X20, 16, GUM_INDEX_POST_ADJUST);
 
     /* GumCpuContext.v[0:8] plus padding for v[8:32] */
-    for (i = 0; i != 8; i += 2)
+    for (i = 0; i != GUM_MINIMAL_QREG_SIZE; i += 2)
     {
       gssize size = 2 * sizeof (GumArm64VectorReg);
 
-      if (i == 6)
-        size += (32 - 8) * sizeof (GumArm64VectorReg);
+      if (i == (GUM_MINIMAL_QREG_SIZE-2))
+        size += (32 - GUM_MINIMAL_QREG_SIZE) * sizeof (GumArm64VectorReg);
 
       gum_arm64_writer_put_ldp_reg_reg_reg_offset (cw,
           AArch64_REG_Q0 + i, AArch64_REG_Q1 + i,
@@ -5698,7 +5698,7 @@ gum_exec_block_open_prolog (GumExecBlock * block,
   /* We don't want to handle this case for performance reasons */
   g_assert (gc->opened_prolog == GUM_PROLOG_NONE);
 
-  gc->opened_prolog = GUM_PROLOG_FULL;
+  gc->opened_prolog = type;
   
   gum_exec_ctx_write_prolog (block->ctx, type, cw);
 }
