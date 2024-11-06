@@ -596,7 +596,8 @@ GUMJS_DEFINE_FUNCTION (gumjs_stalker_followi)
   // GumQuickEventSinkOptions so;
   GumStalkerTransformer * transformer;
   GumEventSink * sink=NULL;
-   gsize size;
+  gsize n_page;
+  gsize dump_interval;
   parent = gumjs_get_parent_module (core);
   stalker = _gum_quick_stalker_get (parent);
   // so.core = core;
@@ -604,11 +605,8 @@ GUMJS_DEFINE_FUNCTION (gumjs_stalker_followi)
   // so.queue_capacity = parent->queue_capacity;
   // so.queue_drain_interval = parent->queue_drain_interval;
 
-  if (!_gum_quick_args_parse (args, "ZZ", &thread_id,&size))
+  if (!_gum_quick_args_parse (args, "ZZZ", &thread_id,&n_page,&dump_interval))
     return JS_EXCEPTION;
-
-
- 
   GumStalkerItransformer *itransformer=g_object_new(GUM_TYPE_STALKER_ITRANSFORMER,NULL);
   transformer=GUM_STALKER_TRANSFORMER(itransformer);
   const gchar* home=gum_get_home_path();
@@ -616,6 +614,7 @@ GUMJS_DEFINE_FUNCTION (gumjs_stalker_followi)
   GError *error=NULL;
   GFile* file=g_file_new_for_path(path);
   GFileOutputStream * btrace=g_file_replace(file,NULL,FALSE,G_FILE_CREATE_NONE,NULL,&error);
+  GBufferedOutputStream * btrace_buffered=g_buffered_output_stream_new(G_OUTPUT_STREAM(btrace));
   if(error!=NULL){
     g_warning("open file error:%s",error->message);
     g_error_free(error);
@@ -631,10 +630,8 @@ GUMJS_DEFINE_FUNCTION (gumjs_stalker_followi)
     g_error_free(error);
     return JS_EXCEPTION;
   }
-  gum_stalker_itransformer_set_buf(itransformer,size);
-  gum_stalker_itransformer_sink_channel(itransformer,G_OUTPUT_STREAM(btrace),G_OUTPUT_STREAM(etrace));
+  gum_stalker_itransformer_set_up(itransformer,n_page,btrace_buffered,etrace,dump_interval);
   
-
   if (thread_id == gum_process_get_current_thread_id ())
   {
     GumQuickScope * scope = core->current_scope;
