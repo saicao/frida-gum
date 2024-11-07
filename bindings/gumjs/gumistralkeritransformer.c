@@ -252,6 +252,105 @@ static void gum_stalker_itransformer_starting(GumCpuContext *cpu_context,
   g_debug("gum_stalker_itransformer_starting");
   dump_imsg_context(&ctx);
 };
+static aarch64_reg xreg2csreg(int x) { return x + AArch64_REG_X0; }
+
+
+struct MemoryAccess {
+  enum IMSG_TYPE type; // uint32_t;
+  guint64 addrees;
+  // payload;
+};
+
+
+void transformer_inst_excute(GumStalkerItransformer *self) {
+
+}
+
+void transformer_save_reg2buf(GumStalkerItransformer *self, aarch64_reg reg);
+void transformer_save_uint162buf(GumStalkerItransformer *self,guint64 i);
+
+void transformer_inst_used(GumStalkerItransformer *self, cs_regs regs,
+                           gsize size) {
+
+};
+void transformer_save_int2buf(GumStalkerItransformer *self,guint64 value){
+
+}
+struct MemAcc {
+  guint32 type;
+  guint64 pc;
+  guint64 address;
+  guint32 size;
+};
+struct InsContext {
+  gsize read_size;
+  gsize write_size;
+  void *pre_register_context;
+  void *post_resiter_context;
+};
+
+void transformer_instruction(GumStalkerItransformer *self, guint64 pc,
+                             guint32 insn, struct InsContext *ctx) {
+  guint32 opcode = extract32(insn, 0, 11);
+  cs_regs regs;
+  switch (opcode) {
+  // ldr size 8
+  case 0b11010101000: {
+    guint32 imm9 = extract32(insn, 12, 9);
+    guint32 rt = extract32(insn, 0, 5);
+    guint32 rn = extract32(insn, 5, 5);
+    aarch64_reg rt_cs = xreg2csreg(rt);
+    aarch64_reg rn_cs = xreg2csreg(rn);
+    regs[0] = rt_cs;
+    regs[1] = rn_cs;
+    transformer_inst_used(self, regs, 2);
+    aarch64_reg temp_reg = allocate_tmp_reg(self);
+    gum_arm64_writer_put_add_reg_reg_imm(self->cw, temp_reg, rn_cs, imm9);
+    transformer_save_int2buf(self,pc);
+    transformer_save_int2buf(self,IMSG_MEM_LOAD);
+    transformer_save_reg2buf(self,temp_reg);
+    transformer_inst_excute(self);
+    transformer_save_reg2buf(self,rt_cs);
+    ctx->read_size = 8;
+  };
+
+      // ldr
+      break;
+  case 0b11010101001:
+    // ldrsw
+    break;
+  case 0b11010101010:
+    // ldrb
+    break;
+  case 0b11010101011:
+    // ldrh
+    break;
+  case 0b11010101100:
+    // ldrsb
+    break;
+  case 0b11010101101:
+    // ldrsh
+    break;
+  case 0b11010101110:
+    // ldrsw
+    break;
+  case 0b11010110000:
+    // str
+    break;
+  case 0b11010110001:
+    // strb
+    break;
+  case 0b11010110010:
+    // strh
+    break;
+  case 0b11010110011:
+    // str
+    break;
+  default:
+    break;
+  }
+}
+
 aarch64_reg allocate_tmp_reg(GumStalkerItransformer *tm) {
   // int reg_idx=-1;
   for (int i = SCRATCH_REG_MAX; i > 0; --i) {
