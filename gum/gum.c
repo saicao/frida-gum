@@ -617,7 +617,7 @@ static void gum_on_log_message(const gchar *log_domain,
   GError *error = NULL;
 
   g_output_stream_write_all(log_stream, buffer, len, NULL, NULL, &error);
-  g_output_stream_flush(log_stream, NULL, NULL);
+  // g_output_stream_flush(log_stream, NULL, NULL);
 #endif
 }
 

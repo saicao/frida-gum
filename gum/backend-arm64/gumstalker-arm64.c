@@ -760,7 +760,8 @@ static gpointer gum_slab_cursor (GumSlab * self);
 static gpointer gum_slab_reserve (GumSlab * self, gsize size);
 static gpointer gum_slab_try_reserve (GumSlab * self, gsize size);
 
-static gpointer gum_find_thread_exit_implementation (void);
+static gpointer gum_find_pthread_exit_implementation (void);
+static gpointer gum_find_thread_exit_implementation(void);
 
 static gboolean gum_is_bl_imm (guint32 insn) G_GNUC_UNUSED;
 
@@ -770,6 +771,7 @@ static GPrivate gum_stalker_exec_ctx_private;
 
 static gpointer gum_unfollow_me_address;
 static gpointer gum_deactivate_address;
+static gpointer gum_pthread_exit_address;
 static gpointer gum_thread_exit_address;
 // struct _Arm64SystemRegs{
 //   //sve
@@ -805,17 +807,20 @@ static void gum_dump_exec_block(csh capstone,GumExecBlock * block)
   
   count=cs_disasm(capstone ,code, size,code, 0, &insn);
   for(gsize i=0;i<count;i++){
-    g_debug("%llx:%s %s",insn[i].address,insn[i].mnemonic,insn[i].op_str);
+    guint32 * bytes=(guint32 *) insn[i].bytes;
+    g_debug("%llx: %08x %s %s",insn[i].address,*bytes,insn[i].mnemonic,insn[i].op_str);
   }
   cs_free( insn, count);
-
-  cs_option(capstone, CS_OPT_SKIPDATA, CS_OPT_ON);
+ cs_option(capstone, CS_OPT_SKIPDATA, CS_OPT_ON);
   code=block->code_start;
   size=block->code_size;
   g_debug("=======tranlate code=======");
   count=cs_disasm(capstone ,code, size,code, 0, &insn);
+  
   for(gsize i=0;i<count;i++){
-    g_debug("%llx:%s %s",insn[i].address,insn[i].mnemonic,insn[i].op_str);
+
+    guint32 * bytes=(guint32 *) insn[i].bytes;
+    g_debug("%llx: %08x %s %s",insn[i].address,*bytes,insn[i].mnemonic,insn[i].op_str);
   }
   cs_free( insn, count);
   cs_option(capstone, CS_OPT_SKIPDATA, CS_OPT_OFF);
@@ -868,7 +873,10 @@ gum_stalker_class_init (GumStalkerClass * klass)
 
   gum_unfollow_me_address = gum_strip_code_pointer (gum_stalker_unfollow_me);
   gum_deactivate_address = gum_strip_code_pointer (gum_stalker_deactivate);
+  gum_pthread_exit_address = gum_find_pthread_exit_implementation ();
   gum_thread_exit_address = gum_find_thread_exit_implementation ();
+  g_debug("gum_pthread_exit_address:%p",gum_pthread_exit_address);
+  g_debug("gum_thread_exit_address:%p",gum_thread_exit_address);
 }
 
 static void
@@ -1387,7 +1395,6 @@ gum_stalker_follow (GumStalker * self,
                     GumStalkerTransformer * transformer,
                     GumEventSink * sink)
 {
-  g_debug("gum_stalker_follow");
   if (thread_id == gum_process_get_current_thread_id ())
   {
     gum_stalker_follow_me (self, transformer, sink);
@@ -2009,7 +2016,7 @@ gum_stalker_destroy_exec_ctx (GumStalker * self,
                               GumExecCtx * ctx)
 {
   GSList * entry;
-
+  g_debug("destroying exec ctx");
   GUM_STALKER_LOCK (self);
   entry = g_slist_find (self->contexts, ctx);
   if (entry != NULL)
@@ -2234,7 +2241,9 @@ gum_exec_ctx_free (GumExecCtx * ctx)
   }
 
   g_object_unref (ctx->sink);
+  g_debug("freeing transformer");
   g_object_unref (ctx->transformer);
+  
   g_clear_object (&ctx->observer);
 
   gum_arm64_relocator_clear (&ctx->relocator);
@@ -2458,7 +2467,18 @@ gum_exec_ctx_switch_block (GumExecCtx * ctx,
     ctx->current_block = NULL;
     ctx->resume_at = start_address;
   }
-  else if (start_address == gum_thread_exit_address)
+  else if(start_address==gum_thread_exit_address){
+    ctx->unfollow_called_while_still_following = TRUE;
+    ctx->current_block = NULL;
+    ctx->resume_at = start_address;
+    //we need check if it is main thread?
+    // I asume it always exit when call exit(); 
+    //frida-payload already set a interceptor for exit
+    gum_stalker_unfollow(ctx->stalker,ctx->thread_id);
+    exit(0);
+    // g_debug("unfollow done");
+  }
+  else if (start_address == gum_pthread_exit_address)
   {
     gum_exec_ctx_unfollow (ctx, start_address);
   }
@@ -5909,9 +5929,15 @@ gum_slab_try_reserve (GumSlab * self,
 
   return cursor;
 }
+static gpointer gum_find_thread_exit_implementation(void){
+    guint32 *   exit = GSIZE_TO_POINTER (gum_strip_code_address (
+      gum_module_find_export_by_name ("libsystem_c.dylib",
+          "exit")));
+    return exit;
+}
 
 static gpointer
-gum_find_thread_exit_implementation (void)
+gum_find_pthread_exit_implementation (void)
 {
 #if defined (HAVE_DARWIN)
   guint32 * cursor;

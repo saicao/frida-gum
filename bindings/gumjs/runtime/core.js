@@ -564,11 +564,14 @@ if (globalThis.Stalker !== undefined) {
     },
     followi: {
       enumerable: true,
-      value: function (threadId, size){
-        if(size === undefined){
-          size=4;
+      value: function (threadId, npage,dump_interval){
+        if(npage === undefined){
+          npage=4;
         }
-        Stalker._followi(threadId, size);
+        if(dump_interval === undefined){
+          dump_interval=1;
+        }
+        Stalker._followi(threadId, npage,dump_interval);
       }
     },
     parse: {

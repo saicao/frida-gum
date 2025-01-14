@@ -158,6 +158,7 @@ static void gum_arm64_writer_commit_literals (GumArm64Writer * self);
 static void gum_arm64_writer_describe_reg (GumArm64Writer * self,
     aarch64_reg reg, GumArm64RegInfo * ri);
 
+
 static GumArm64MemOperandType gum_arm64_mem_operand_type_from_reg_info (
     const GumArm64RegInfo * ri);
 
@@ -1445,6 +1446,12 @@ gum_arm64_writer_put_mov_reg_reg (GumArm64Writer * self,
   }
 
   return TRUE;
+}
+void gum_arm64_writer_put_mov_imm(GumArm64Writer * self,
+                                   aarch64_reg reg,guint16 imm){
+  GumArm64RegInfo rd;
+  gum_arm64_writer_describe_reg (self, reg, &rd);
+  gum_arm64_writer_put_instruction (self, (0xd2800000 |rd.index)| (imm<<5));
 }
 
 void
