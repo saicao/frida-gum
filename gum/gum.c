@@ -327,7 +327,6 @@ void gum_deinit_embedded(void) {
 #ifdef HAVE_FRIDA_GLIB
   glib_shutdown();
 #endif
-  gum_clear_object(&gum_cached_interceptor);
 
   g_clear_object (&gum_cached_interceptor);
 
@@ -621,6 +620,7 @@ static void gum_on_log_message(const gchar *log_domain,
   g_output_stream_write_all(log_stream, buffer, len, NULL, NULL, &error);
   // g_output_stream_flush(log_stream, NULL, NULL);
 #endif
+}
 }
 
 void

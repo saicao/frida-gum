@@ -1817,17 +1817,17 @@ gum_detect_pthread_basics (csh capstone,
 #elif defined (HAVE_ARM64)
   {
     const uint8_t * adrp_location = NULL;
-    arm64_reg adrp_reg = ARM64_REG_INVALID;
+    aarch64_reg adrp_reg = AArch64_REG_INVALID;
     gsize accumulated_value = 0;
 
     while ((num_locations != 2 || mach_port_offset == 0) &&
         cs_disasm_iter (capstone, &code, &size, &addr, insn))
     {
-      const cs_arm64 * arm64 = &insn->detail->arm64;
+      const cs_aarch64 * arm64 = &insn->detail->aarch64;
 
       switch (insn->id)
       {
-        case ARM64_INS_ADRP:
+        case AArch64_INS_ADRP:
         {
           adrp_location = code - insn->size;
           adrp_reg = arm64->operands[0].reg;
@@ -1835,41 +1835,41 @@ gum_detect_pthread_basics (csh capstone,
 
           break;
         }
-        case ARM64_INS_ADD:
+        case AArch64_INS_ADD:
         {
           const uint8_t * add_location = code - insn->size;
-          const cs_arm64_op * dst = &arm64->operands[0];
-          const cs_arm64_op * n = &arm64->operands[1];
-          const cs_arm64_op * m = &arm64->operands[2];
+          const cs_aarch64_op * dst = &arm64->operands[0];
+          const cs_aarch64_op * n = &arm64->operands[1];
+          const cs_aarch64_op * m = &arm64->operands[2];
 
           if (adrp_location != NULL &&
               add_location - 4 == adrp_location &&
               dst->reg == adrp_reg &&
               n->reg == dst->reg &&
-              m->type == ARM64_OP_IMM)
+              m->type == AArch64_OP_IMM)
           {
             accumulated_value += m->imm;
           }
 
           break;
         }
-        case ARM64_INS_LDR:
+        case AArch64_INS_LDR:
         {
           const uint8_t * ldr_location = code - insn->size;
-          const arm64_op_mem * src = &arm64->operands[1].mem;
+          const aarch64_op_mem * src = &arm64->operands[1].mem;
 
           if (adrp_location != NULL &&
               ldr_location - 4 == adrp_location &&
               src->base == adrp_reg &&
-              src->index == ARM64_REG_INVALID &&
+              src->index == AArch64_REG_INVALID &&
               src->disp !=0)
           {
             accumulated_value += src->disp;
           }
           else if (mach_port_offset == 0 &&
-              src->base != ARM64_REG_SP &&
-              src->base != ARM64_REG_FP &&
-              src->index == ARM64_REG_INVALID &&
+              src->base != AArch64_REG_SP &&
+              src->base != AArch64_REG_FP &&
+              src->index == AArch64_REG_INVALID &&
               src->disp != 0)
           {
             mach_port_offset = src->disp;
@@ -1956,19 +1956,19 @@ gum_detect_pthread_name_offset (csh capstone,
   {
     while (cs_disasm_iter (capstone, &code, &size, &addr, insn))
     {
-      const cs_arm64 * arm64 = &insn->detail->arm64;
+      const cs_aarch64 * arm64 = &insn->detail->aarch64;
 
       switch (insn->id)
       {
-        case ARM64_INS_ADD:
+        case AArch64_INS_ADD:
         {
-          const cs_arm64_op * dst = &arm64->operands[0];
-          const cs_arm64_op * n = &arm64->operands[1];
-          const cs_arm64_op * m = &arm64->operands[2];
+          const cs_aarch64_op * dst = &arm64->operands[0];
+          const cs_aarch64_op * n = &arm64->operands[1];
+          const cs_aarch64_op * m = &arm64->operands[2];
 
-          if (dst->reg == ARM64_REG_X0 &&
-              n->reg != ARM64_REG_SP &&
-              m->type == ARM64_OP_IMM)
+          if (dst->reg == AArch64_REG_X0 &&
+              n->reg != AArch64_REG_SP &&
+              m->type == AArch64_OP_IMM)
           {
             *name_offset = m->imm;
             return TRUE;

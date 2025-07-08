@@ -1969,7 +1969,7 @@ gum_emit_arm64_tlv_init_code (GumEmitArm64Context * ctx)
   gum_arm64_writer_put_and_reg_reg_imm (aw, AArch64_REG_X20, AArch64_REG_X20,
       (guint64) -8);
   gum_arm64_writer_put_add_reg_reg_reg (aw,AArch64_REG_X19, AArch64_REG_X19,
-      ARM64_REG_X20);
+      AArch64_REG_X20);
   gum_arm64_writer_put_ldr_reg_address (aw, AArch64_REG_X20, self->tlv_area);
   gum_arm64_writer_put_str_reg_reg (aw, AArch64_REG_X20, AArch64_REG_X19);
 

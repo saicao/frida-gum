@@ -1634,8 +1634,8 @@ gum_arm64_writer_put_eor_reg_reg_reg (GumArm64Writer * self,
 
 gboolean
 gum_arm64_writer_put_ubfm (GumArm64Writer * self,
-                           arm64_reg dst_reg,
-                           arm64_reg src_reg,
+                           aarch64_reg dst_reg,
+                           aarch64_reg src_reg,
                            guint8 immr,
                            guint8 imms)
 {

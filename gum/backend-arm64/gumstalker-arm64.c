@@ -46,6 +46,7 @@
 #define GUM_INVALIDATE_TRAMPOLINE_MAX_SIZE 40
 #define GUM_RESTORATION_PROLOG_SIZE        4
 #define GUM_EXCLUSIVE_ACCESS_MAX_DEPTH     8
+#define GUM_MINIMAL_QREG_SIZE              14
 
 #if defined (__LP64__) || defined (_WIN64)
 # define GUM_IC_MAGIC_EMPTY         G_GUINT64_CONSTANT (0xbaadd00ddeadface)
@@ -697,9 +698,9 @@ static void gum_exec_block_write_jmp_transfer_code (GumExecBlock * block,
     const GumBranchTarget * target, GumExecCtxReplaceCurrentBlockFunc func,
     GumGeneratorContext * gc);
 static void gum_exec_block_write_ret_transfer_code (GumExecBlock * block,
-    GumGeneratorContext * gc, arm64_reg ret_reg);
+    GumGeneratorContext * gc, aarch64_reg ret_reg);
 static void gum_exec_block_write_chaining_return_code (GumExecBlock * block,
-    GumGeneratorContext * gc, arm64_reg ret_reg);
+    GumGeneratorContext * gc, aarch64_reg ret_reg);
 static void gum_exec_block_write_slab_transfer_code (GumArm64Writer * from,
     GumArm64Writer * to);
 static void gum_exec_block_backpatch_slab (GumExecBlock * block,
@@ -777,7 +778,7 @@ static GPrivate gum_stalker_exec_ctx_private;
 
 static gpointer gum_unfollow_me_address;
 static gpointer gum_deactivate_address;
-static gpointer gum_pthread_exit_address;
+// static gpointer gum_pthread_exit_address;
 static gpointer gum_thread_exit_address;
 // struct _Arm64SystemRegs{
 //   //sve
@@ -811,7 +812,7 @@ static void gum_dump_exec_block(csh capstone,GumExecBlock * block)
   
   cs_insn * insn;
   
-  count=cs_disasm(capstone ,code, size,code, 0, &insn);
+  count=cs_disasm(capstone ,code, size,(uint64_t)code, 0, &insn);
   for(gsize i=0;i<count;i++){
     guint32 * bytes=(guint32 *) insn[i].bytes;
     g_debug("%llx: %08x %s %s",insn[i].address,*bytes,insn[i].mnemonic,insn[i].op_str);
@@ -821,7 +822,7 @@ static void gum_dump_exec_block(csh capstone,GumExecBlock * block)
   code=block->code_start;
   size=block->code_size;
   g_debug("=======tranlate code=======");
-  count=cs_disasm(capstone ,code, size,code, 0, &insn);
+  count=cs_disasm(capstone ,code, size,(uint64_t)code, 0, &insn);
   
   for(gsize i=0;i<count;i++){
 
@@ -879,10 +880,10 @@ gum_stalker_class_init (GumStalkerClass * klass)
 
   gum_unfollow_me_address = gum_strip_code_pointer (gum_stalker_unfollow_me);
   gum_deactivate_address = gum_strip_code_pointer (gum_stalker_deactivate);
-  gum_pthread_exit_address = gum_find_pthread_exit_implementation ();
-  gum_thread_exit_address = gum_find_thread_exit_implementation ();
-  g_debug("gum_pthread_exit_address:%p",gum_pthread_exit_address);
-  g_debug("gum_thread_exit_address:%p",gum_thread_exit_address);
+  gum_thread_exit_address = gum_find_pthread_exit_implementation ();
+  // gum_thread_exit_address = gum_find_thread_exit_implementation ();
+  // g_debug("gum_pthread_exit_address:%p",gum_pthread_exit_address);
+  // g_debug("gum_thread_exit_address:%p",gum_thread_exit_address);
 }
 
 static void
@@ -2060,8 +2061,8 @@ _gum_stalker_modify_to_run_on_thread (GumStalker * self,
    *
    * This same approach is used elsewhere in Stalker for arm64.
    */
-  gum_arm64_writer_put_ldr_reg_address (cw, ARM64_REG_X17, pc);
-  gum_arm64_writer_put_br_reg_no_auth (cw, ARM64_REG_X17);
+  gum_arm64_writer_put_ldr_reg_address (cw, AArch64_REG_X17, pc);
+  gum_arm64_writer_put_br_reg_no_auth (cw, AArch64_REG_X17);
 
   gum_arm64_writer_flush (cw);
   gum_stalker_freeze (self, cw->base, gum_arm64_writer_offset (cw));
@@ -2553,7 +2554,7 @@ gum_exec_ctx_switch_block (GumExecCtx * ctx,
     exit(0);
     // g_debug("unfollow done");
   }
-  else if (start_address == gum_pthread_exit_address)
+  else if (start_address == gum_thread_exit_address)
   {
     gum_exec_ctx_unfollow (ctx, start_address);
   }
@@ -3241,7 +3242,7 @@ gum_stalker_iterator_put_chaining_return (GumStalkerIterator * self)
   if ((block->ctx->sink_mask & GUM_RET) != 0)
     gum_exec_block_write_ret_event_code (block, gc, GUM_CODE_INTERRUPTIBLE);
 
-  gum_exec_block_write_chaining_return_code (block, gc, ARM64_REG_X30);
+  gum_exec_block_write_chaining_return_code (block, gc, AArch64_REG_X30);
 }
 
 csh
@@ -3947,8 +3948,8 @@ static guint64
 gum_exec_ctx_read_register (GumCpuContext * cpu_context,
                             aarch64_reg reg)
 {
-  if (reg >= ARM64_REG_X0 && reg <= ARM64_REG_X28)
-    return cpu_context->x[reg - ARM64_REG_X0];
+  if (reg >= AArch64_REG_X0 && reg <= AArch64_REG_X28)
+    return cpu_context->x[reg - AArch64_REG_X0];
 
   switch (reg)
   {
@@ -3966,9 +3967,9 @@ gum_exec_ctx_write_register (GumCpuContext * cpu_context,
                              aarch64_reg reg,
                              guint64 value)
 {
-  if (reg >= ARM64_REG_X0 && reg <= ARM64_REG_X28)
+  if (reg >= AArch64_REG_X0 && reg <= AArch64_REG_X28)
   {
-    cpu_context->x[reg - ARM64_REG_X0] = value;
+    cpu_context->x[reg - AArch64_REG_X0] = value;
     return;
   }
 
@@ -5212,7 +5213,7 @@ gum_exec_block_write_ret_transfer_code (GumExecBlock * block,
 static void
 gum_exec_block_write_chaining_return_code (GumExecBlock * block,
                                            GumGeneratorContext  * gc,
-                                           arm64_reg ret_reg)
+                                           aarch64_reg ret_reg)
 {
   GumArm64Writer * cw = gc->code_writer;
   GumArm64Writer * cws = gc->slow_writer;

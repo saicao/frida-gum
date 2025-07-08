@@ -753,7 +753,7 @@ gum_emit_test_clobber_regs_function (gpointer mem,
     if (is_platform_register)
       continue;
     gum_arm64_writer_put_ldr_reg_reg_offset (&cw, AArch64_REG_X0 + i,
-        ARM64_REG_X0, G_STRUCT_OFFSET (GumCpuContext, x) + (i * 8));
+        AArch64_REG_X0, G_STRUCT_OFFSET (GumCpuContext, x) + (i * 8));
   }
 
   gum_arm64_writer_put_bl_imm (&cw,

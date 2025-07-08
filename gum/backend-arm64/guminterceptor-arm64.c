@@ -810,11 +810,11 @@ _gum_interceptor_backend_create_trampoline (GumInterceptorBackend * self,
 
     while ((insn = gum_arm64_relocator_peek_next_write_insn (ar)) != NULL)
     {
-      const cs_arm64_op * source_op = &insn->detail->arm64.operands[1];
+      const cs_aarch64_op * source_op = &insn->detail->aarch64.operands[1];
 
-      if (insn->id == ARM64_INS_MOV &&
-          source_op->type == ARM64_OP_REG &&
-          source_op->reg == ARM64_REG_LR)
+      if (insn->id == AArch64_INS_MOV &&
+          source_op->type == AArch64_OP_REG &&
+          source_op->reg == AArch64_REG_LR)
       {
         aarch64_reg dst_reg = insn->detail->aarch64.operands[0].reg;
         const guint reg_size = sizeof (gpointer);
@@ -1017,11 +1017,11 @@ _gum_interceptor_backend_detect_hook_size (gconstpointer code,
                                            csh capstone,
                                            cs_insn * insn)
 {
-  const cs_arm64 * arm64 = &insn->detail->arm64;
+  const cs_aarch64 * arm64 = &insn->detail->aarch64;
   const uint8_t * start, * cursor;
   size_t size;
   uint64_t addr;
-  arm64_reg expecting_branch_to_trampoline_in_reg = ARM64_REG_INVALID;
+  aarch64_reg expecting_branch_to_trampoline_in_reg = AArch64_REG_INVALID;
   gsize inline_data_size = 0;
   gboolean expecting_call_to_shared_deflector = FALSE;
 
@@ -1034,26 +1034,26 @@ _gum_interceptor_backend_detect_hook_size (gconstpointer code,
     return 0;
   switch (insn->id)
   {
-    case ARM64_INS_B:
+    case AArch64_INS_B:
       return cursor - start;
-    case ARM64_INS_ADRP:
-    case ARM64_INS_LDR:
+    case AArch64_INS_ADRP:
+    case AArch64_INS_LDR:
       switch (arm64->operands[0].reg)
       {
-        case ARM64_REG_X16:
-        case ARM64_REG_X17:
+        case AArch64_REG_X16:
+        case AArch64_REG_X17:
           expecting_branch_to_trampoline_in_reg = arm64->operands[0].reg;
-          if (insn->id == ARM64_INS_LDR)
+          if (insn->id == AArch64_INS_LDR)
             inline_data_size = 8;
           break;
         default:
           break;
       }
       break;
-    case ARM64_INS_STP:
+    case AArch64_INS_STP:
       expecting_call_to_shared_deflector =
-          arm64->operands[0].reg == ARM64_REG_X0 &&
-          arm64->operands[1].reg == ARM64_REG_LR;
+          arm64->operands[0].reg == AArch64_REG_X0 &&
+          arm64->operands[1].reg == AArch64_REG_LR;
       break;
     default:
       break;
@@ -1063,12 +1063,12 @@ _gum_interceptor_backend_detect_hook_size (gconstpointer code,
     return 0;
   switch (insn->id)
   {
-    case ARM64_INS_BR:
-    case ARM64_INS_BRAAZ:
+    case AArch64_INS_BR:
+    case AArch64_INS_BRAAZ:
       if (arm64->operands[0].reg == expecting_branch_to_trampoline_in_reg)
         return (cursor - start) + inline_data_size;
       break;
-    case ARM64_INS_BL:
+    case AArch64_INS_BL:
       if (expecting_call_to_shared_deflector)
         return cursor - start;
       break;
