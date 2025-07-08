@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2008-2019 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2008-2025 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  * Copyright (C) 2008 Christian Berentsen <jc.berentsen@gmail.com>
  *
  * Licence: wxWindows Library Licence, Version 3.1
@@ -85,7 +85,8 @@ struct _GumFunctionContext
   GumSamplerInterface * sampler_interface;
   GumSampler * sampler_instance;
   GumWorstCaseInspectorFunc inspector_func;
-  gpointer inspector_user_data;
+  gpointer inspector_data;
+  GDestroyNotify inspector_data_destroy;
 
   GumFunctionThreadContext thread_contexts[GUM_MAX_THREADS];
   volatile gint thread_context_count;
@@ -239,7 +240,7 @@ gum_profiler_on_enter (GumInvocationListener * listener,
     if ((inspector_func = fctx->inspector_func) != NULL)
     {
       inspector_func (context, tctx->potential_info.buf,
-          sizeof (tctx->potential_info.buf), fctx->inspector_user_data);
+          sizeof (tctx->potential_info.buf), fctx->inspector_data);
     }
 
     inv->start_time = fctx->sampler_interface->sample (fctx->sampler_instance);
@@ -354,7 +355,7 @@ gum_profiler_instrument_function (GumProfiler * self,
                                   GumSampler * sampler)
 {
   return gum_profiler_instrument_function_with_inspector (self,
-      function_address, sampler, NULL, NULL);
+      function_address, sampler, NULL, NULL, NULL);
 }
 
 GumInstrumentReturn
@@ -363,7 +364,8 @@ gum_profiler_instrument_function_with_inspector (
     gpointer function_address,
     GumSampler * sampler,
     GumWorstCaseInspectorFunc inspector_func,
-    gpointer user_data)
+    gpointer data,
+    GDestroyNotify data_destroy)
 {
   GumInstrumentReturn result = GUM_INSTRUMENT_OK;
   GumFunctionContext * ctx;
@@ -372,7 +374,7 @@ gum_profiler_instrument_function_with_inspector (
   ctx = g_new0 (GumFunctionContext, 1);
 
   attach_ret = gum_interceptor_attach (self->interceptor, function_address,
-      GUM_INVOCATION_LISTENER (self), ctx);
+      GUM_INVOCATION_LISTENER (self), ctx, GUM_ATTACH_FLAGS_NONE);
   if (attach_ret != GUM_ATTACH_OK)
     goto error;
 
@@ -380,7 +382,8 @@ gum_profiler_instrument_function_with_inspector (
   ctx->sampler_interface = GUM_SAMPLER_GET_IFACE (sampler);
   ctx->sampler_instance = g_object_ref (sampler);
   ctx->inspector_func = inspector_func;
-  ctx->inspector_user_data = user_data;
+  ctx->inspector_data = data;
+  ctx->inspector_data_destroy = data_destroy;
 
   GUM_PROFILER_LOCK ();
   g_hash_table_insert (self->function_by_address, function_address, ctx);
@@ -408,7 +411,11 @@ unstrument_and_free_function (gpointer key,
 {
   GumFunctionContext * function_ctx = (GumFunctionContext *) value;
 
+  if (function_ctx->inspector_data_destroy != NULL)
+    function_ctx->inspector_data_destroy (function_ctx->inspector_data);
+
   g_object_unref (function_ctx->sampler_instance);
+
   g_free (function_ctx);
 }
 
@@ -418,8 +425,10 @@ gum_profiler_generate_report (GumProfiler * self)
   GumProfileReport * report;
 
   report = gum_profile_report_new ();
+  GUM_PROFILER_LOCK ();
   g_hash_table_foreach (self->function_by_address, add_to_report_if_root_node,
       report);
+  GUM_PROFILER_UNLOCK ();
   _gum_profile_report_sort (report);
 
   return report;

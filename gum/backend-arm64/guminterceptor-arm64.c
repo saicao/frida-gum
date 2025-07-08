@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2022 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2014-2025 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  * Copyright (C) 2022 Francesco Tamagni <mrmacete@protonmail.ch>
  *
  * Licence: wxWindows Library Licence, Version 3.1
@@ -14,12 +14,10 @@
 #include "gumlibc.h"
 #include "gummemory.h"
 #ifdef HAVE_DARWIN
-# include "gumdarwin.h"
+# include "gum/gumdarwin.h"
 # include "gumdarwingrafter-priv.h"
 #endif
 
-#include <string.h>
-#include <unistd.h>
 #ifdef HAVE_DARWIN
 # include <dlfcn.h>
 # include <mach-o/dyld.h>
@@ -59,9 +57,6 @@ struct _GumArm64FunctionContextData
 
 G_STATIC_ASSERT (sizeof (GumArm64FunctionContextData)
     <= sizeof (GumFunctionContextBackendData));
-
-extern void _gum_interceptor_begin_invocation (void);
-extern void _gum_interceptor_end_invocation (void);
 
 static void gum_interceptor_backend_create_thunks (
     GumInterceptorBackend * self);
@@ -153,6 +148,9 @@ struct _GumGraftedSegmentPairDetails
   GumGraftedImport * imports;
   guint32 num_imports;
 };
+
+extern void _gum_interceptor_begin_invocation (void);
+extern void _gum_interceptor_end_invocation (void);
 
 static void gum_on_module_added (const struct mach_header * mh,
     intptr_t vmaddr_slide);
@@ -726,10 +724,11 @@ _gum_interceptor_backend_create_trampoline (GumInterceptorBackend * self,
     gpointer return_address;
     gboolean dedicated;
 
-    caller.near_address = function_address + data->redirect_code_size - 4;
+    caller.near_address =
+        (guint8 *) function_address + data->redirect_code_size - 4;
     caller.max_distance = GUM_ARM64_B_MAX_DISTANCE;
 
-    return_address = function_address + data->redirect_code_size;
+    return_address = (guint8 *) function_address + data->redirect_code_size;
 
     dedicated = data->redirect_code_size == 4;
 
@@ -811,8 +810,11 @@ _gum_interceptor_backend_create_trampoline (GumInterceptorBackend * self,
 
     while ((insn = gum_arm64_relocator_peek_next_write_insn (ar)) != NULL)
     {
-      if (insn->id == AArch64_INS_MOV &&
-          insn->detail->aarch64.operands[1].reg == AArch64_REG_LR)
+      const cs_arm64_op * source_op = &insn->detail->arm64.operands[1];
+
+      if (insn->id == ARM64_INS_MOV &&
+          source_op->type == ARM64_OP_REG &&
+          source_op->reg == ARM64_REG_LR)
       {
         aarch64_reg dst_reg = insn->detail->aarch64.operands[0].reg;
         const guint reg_size = sizeof (gpointer);
@@ -1008,6 +1010,73 @@ _gum_interceptor_backend_resolve_redirect (GumInterceptorBackend * self,
                                            gpointer address)
 {
   return gum_arm64_reader_try_get_relative_jump_target (address);
+}
+
+gsize
+_gum_interceptor_backend_detect_hook_size (gconstpointer code,
+                                           csh capstone,
+                                           cs_insn * insn)
+{
+  const cs_arm64 * arm64 = &insn->detail->arm64;
+  const uint8_t * start, * cursor;
+  size_t size;
+  uint64_t addr;
+  arm64_reg expecting_branch_to_trampoline_in_reg = ARM64_REG_INVALID;
+  gsize inline_data_size = 0;
+  gboolean expecting_call_to_shared_deflector = FALSE;
+
+  start = code;
+  cursor = start;
+  size = 16;
+  addr = GPOINTER_TO_SIZE (cursor);
+
+  if (!cs_disasm_iter (capstone, &cursor, &size, &addr, insn))
+    return 0;
+  switch (insn->id)
+  {
+    case ARM64_INS_B:
+      return cursor - start;
+    case ARM64_INS_ADRP:
+    case ARM64_INS_LDR:
+      switch (arm64->operands[0].reg)
+      {
+        case ARM64_REG_X16:
+        case ARM64_REG_X17:
+          expecting_branch_to_trampoline_in_reg = arm64->operands[0].reg;
+          if (insn->id == ARM64_INS_LDR)
+            inline_data_size = 8;
+          break;
+        default:
+          break;
+      }
+      break;
+    case ARM64_INS_STP:
+      expecting_call_to_shared_deflector =
+          arm64->operands[0].reg == ARM64_REG_X0 &&
+          arm64->operands[1].reg == ARM64_REG_LR;
+      break;
+    default:
+      break;
+  }
+
+  if (!cs_disasm_iter (capstone, &cursor, &size, &addr, insn))
+    return 0;
+  switch (insn->id)
+  {
+    case ARM64_INS_BR:
+    case ARM64_INS_BRAAZ:
+      if (arm64->operands[0].reg == expecting_branch_to_trampoline_in_reg)
+        return (cursor - start) + inline_data_size;
+      break;
+    case ARM64_INS_BL:
+      if (expecting_call_to_shared_deflector)
+        return cursor - start;
+      break;
+    default:
+      break;
+  }
+
+  return 0;
 }
 
 static void

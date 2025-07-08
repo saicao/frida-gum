@@ -1,25 +1,23 @@
 /*
- * Copyright (C) 2015-2022 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2015-2024 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  * Copyright (C) 2021 Francesco Tamagni <mrmacete@protonmail.ch>
  *
  * Licence: wxWindows Library Licence, Version 3.1
  */
 
-#ifndef GUM_DIET
-
-#include "gumunwbacktracer.h"
+#include "gum/gumunwbacktracer.h"
 
 #include "guminterceptor.h"
 #ifdef HAVE_LINUX
-# include "backend-linux/gumlinux.h"
+# include "gum/gumlinux.h"
 # define gum_os_unparse_ucontext gum_linux_unparse_ucontext
 #endif
 #ifdef HAVE_FREEBSD
-# include "backend-freebsd/gumfreebsd.h"
+# include "gum/gumfreebsd.h"
 # define gum_os_unparse_ucontext gum_freebsd_unparse_ucontext
 #endif
 #ifdef HAVE_QNX
-# include "backend-qnx/gumqnx.h"
+# include "gum/gumqnx.h"
 # define gum_os_unparse_ucontext gum_qnx_unparse_ucontext
 #endif
 
@@ -226,5 +224,3 @@ gum_cpu_context_to_unw (const GumCpuContext * ctx,
 # error FIXME
 #endif
 }
-
-#endif

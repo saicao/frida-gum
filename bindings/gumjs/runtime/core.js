@@ -1,24 +1,23 @@
-const Console = require('./console');
-const hexdump = require('./hexdump');
-const MessageDispatcher = require('./message-dispatcher');
-const Worker = require('./worker');
+import { Console } from './console.js';
+import { hexdump } from './hexdump.js';
+import { MessageDispatcher } from './message-dispatcher.js';
+import { Worker } from './worker.js';
 
-const engine = global;
 let messageDispatcher;
 
 function initialize() {
   messageDispatcher = new MessageDispatcher();
 
-  const proxyClass = engine.Proxy;
+  const proxyClass = globalThis.Proxy;
   if ('create' in proxyClass) {
     const createProxy = proxyClass.create;
-    engine.Proxy = function (target, handler) {
+    globalThis.Proxy = function (target, handler) {
       return createProxy.call(proxyClass, handler, Object.getPrototypeOf(target));
     };
   }
 }
 
-Object.defineProperties(engine, {
+Object.defineProperties(globalThis, {
   rpc: {
     enumerable: true,
     value: {
@@ -46,7 +45,7 @@ Object.defineProperties(engine, {
         type: 'send',
         payload: payload
       };
-      engine._send(JSON.stringify(message), data || null);
+      globalThis._send(JSON.stringify(message), data || null);
     }
   },
   setTimeout: {
@@ -111,74 +110,7 @@ Object.defineProperties(engine, {
     enumerable: true,
     value: Worker
   },
-  ObjC: {
-    enumerable: true,
-    configurable: true,
-    get: function () {
-      let m;
-      if (Frida._loadObjC())
-        m = Frida._objc;
-      else
-        m = makeStubBridge();
-      Object.defineProperty(engine, 'ObjC', { value: m });
-      return m;
-    }
-  },
-  Swift: {
-    enumerable: true,
-    configurable: true,
-    get: function () {
-      let m;
-      if (Frida._loadSwift())
-        m = Frida._swift;
-      else
-        m = makeStubBridge();
-      Object.defineProperty(engine, 'Swift', { value: m });
-      return m;
-    }
-  },
-  Java: {
-    enumerable: true,
-    configurable: true,
-    get: function () {
-      let m;
-      if (Frida._loadJava())
-        m = Frida._java;
-      else
-        m = makeStubBridge();
-      Object.defineProperty(engine, 'Java', { value: m });
-      return m;
-    }
-  },
 });
-
-function makeStubBridge() {
-  return Object.freeze({ available: false });
-}
-
-const pointerPrototype = NativePointer.prototype;
-
-Object.getOwnPropertyNames(Memory)
-  .forEach(methodName => {
-    if (methodName.indexOf('read') === 0) {
-      pointerPrototype[methodName] = makePointerReadMethod(Memory[methodName]);
-    } else if (methodName.indexOf('write') === 0) {
-      pointerPrototype[methodName] = makePointerWriteMethod(Memory[methodName]);
-    }
-  });
-
-function makePointerReadMethod(read) {
-  return function (...args) {
-    return read.call(Memory, this, ...args);
-  };
-}
-
-function makePointerWriteMethod(write) {
-  return function (...args) {
-    write.call(Memory, this, ...args);
-    return this;
-  };
-}
 
 [
   Int64,
@@ -194,12 +126,10 @@ function numberWrapperEquals(rhs) {
 
 const _nextTick = Script._nextTick;
 Script.nextTick = function (callback, ...args) {
-  _nextTick(callback.bind(engine, ...args));
+  _nextTick(callback.bind(globalThis, ...args));
 };
 
-makeEnumerateApi(Kernel, 'enumerateModules', 0);
 makeEnumerateRanges(Kernel);
-makeEnumerateApi(Kernel, 'enumerateModuleRanges', 2);
 
 Object.defineProperties(Kernel, {
   scan: {
@@ -279,90 +209,44 @@ Object.defineProperties(Memory, {
   }
 });
 
-makeEnumerateApi(Module, 'enumerateImports', 1);
-makeEnumerateApi(Module, 'enumerateExports', 1);
-makeEnumerateApi(Module, 'enumerateSymbols', 1);
-makeEnumerateApi(Module, 'enumerateRanges', 2);
-makeEnumerateApi(Module, 'enumerateSections', 1);
-makeEnumerateApi(Module, 'enumerateDependencies', 1);
-
 Object.defineProperties(Module, {
-  load: {
+  getGlobalExportByName: {
     enumerable: true,
-    value: function (moduleName) {
-      Module._load(moduleName);
-      return Process.getModuleByName(moduleName);
-    }
-  },
-  getBaseAddress: {
-    enumerable: true,
-    value: function (moduleName) {
-      const base = Module.findBaseAddress(moduleName);
-      if (base === null)
-        throw new Error("unable to find module '" + moduleName + "'");
-      return base;
-    }
-  },
-  getExportByName: {
-    enumerable: true,
-    value: function (moduleName, symbolName) {
-      const address = Module.findExportByName(moduleName, symbolName);
-      if (address === null) {
-        const prefix = (moduleName !== null) ? (moduleName + ': ') : '';
-        throw new Error(prefix + "unable to find export '" + symbolName + "'");
-      }
+    value(symbolName) {
+      const address = Module.findGlobalExportByName(symbolName);
+      if (address === null)
+        throw new Error(`unable to find global export '${symbolName}'`);
       return address;
     }
   },
 });
 
-Object.defineProperties(Module.prototype, {
-  enumerateImports: {
-    enumerable: true,
-    value: function () {
-      return Module.enumerateImports(this.path);
-    }
-  },
-  enumerateExports: {
-    enumerable: true,
-    value: function () {
-      return Module.enumerateExports(this.path);
-    }
-  },
-  enumerateSymbols: {
-    enumerable: true,
-    value: function () {
-      return Module.enumerateSymbols(this.path);
-    }
-  },
-  enumerateRanges: {
-    enumerable: true,
-    value: function (protection) {
-      return Module.enumerateRanges(this.path, protection);
-    }
-  },
-  enumerateSections: {
-    enumerable: true,
-    value: function () {
-      return Module.enumerateSections(this.path);
-    }
-  },
-  enumerateDependencies: {
-    enumerable: true,
-    value: function () {
-      return Module.enumerateDependencies(this.path);
-    }
-  },
-  findExportByName: {
-    enumerable: true,
-    value: function (exportName) {
-      return Module.findExportByName(this.path, exportName);
-    }
-  },
+const moduleProto = Module.prototype;
+
+Object.defineProperties(moduleProto, {
   getExportByName: {
     enumerable: true,
-    value: function (exportName) {
-      return Module.getExportByName(this.path, exportName);
+    value(symbolName) {
+      const address = this.findExportByName(symbolName);
+      if (address === null)
+        throw new Error(`${this.path}: unable to find export '${symbolName}'`);
+      return address;
+    }
+  },
+  getSymbolByName: {
+    enumerable: true,
+    value(symbolName) {
+      const address = this.findSymbolByName(symbolName);
+      if (address === null)
+        throw new Error(`${this.path}: unable to find symbol '${symbolName}'`);
+      return address;
+    }
+  },
+  toJSON: {
+    enumerable: true,
+    value() {
+      const {name, base, size, path} = this;
+      return {name, base, size, path};
     }
   },
 });
@@ -397,29 +281,22 @@ Object.defineProperties(ModuleMap.prototype, {
   },
 });
 
-makeEnumerateApi(Process, 'enumerateThreads', 0);
-makeEnumerateApi(Process, 'enumerateModules', 0);
 makeEnumerateRanges(Process);
-makeEnumerateApi(Process, 'enumerateMallocRanges', 0);
 
 Object.defineProperties(Process, {
-  findModuleByAddress: {
+  runOnThread: {
     enumerable: true,
-    value: function (address) {
-      let module = null;
-      Process._enumerateModules({
-        onMatch(m) {
-          const base = m.base;
-          if (base.compare(address) <= 0 && base.add(m.size).compare(address) > 0) {
-            module = m;
-            return 'stop';
+    value: function (threadId, callback) {
+      return new Promise((resolve, reject) => {
+        Process._runOnThread(threadId, () => {
+          try {
+            resolve(callback());
+          } catch (e) {
+            reject(e);
           }
-        },
-        onComplete() {
-        }
+        });
       });
-      return module;
-    }
+    },
   },
   getModuleByAddress: {
     enumerable: true,
@@ -450,28 +327,25 @@ Object.defineProperties(Process, {
   },
 });
 
-if (Process.findRangeByAddress === undefined) {
-  Object.defineProperty(Process, 'findRangeByAddress', {
+Object.defineProperties(Thread, {
+  backtrace: {
     enumerable: true,
-    value: function (address) {
-      let range = null;
-      Process._enumerateRanges('---', {
-        onMatch(r) {
-          const base = r.base;
-          if (base.compare(address) <= 0 && base.add(r.size).compare(address) > 0) {
-            range = r;
-            return 'stop';
-          }
-        },
-        onComplete() {
-        }
-      });
-      return range;
-    }
-  });
-}
+    value: function (cpuContext = null, backtracerOrOptions = {}) {
+      const options = (typeof backtracerOrOptions === 'object')
+          ? backtracerOrOptions
+          : { backtracer: backtracerOrOptions };
 
-if (globalThis.Interceptor !== undefined) {
+      const {
+        backtracer = Backtracer.ACCURATE,
+        limit = 0,
+      } = options;
+
+      return Thread._backtrace(cpuContext, backtracer, limit);
+    }
+  },
+});
+
+if ('Interceptor' in globalThis) {
   Object.defineProperties(Interceptor, {
     attach: {
       enumerable: true,
@@ -497,7 +371,7 @@ if (globalThis.Interceptor !== undefined) {
   });
 }
 
-if (globalThis.Stalker !== undefined) {
+if ('Stalker' in globalThis) {
   const stalkerEventType = {
     call: 1,
     ret: 2,
@@ -596,204 +470,204 @@ Object.defineProperty(Instruction, 'parse', {
   }
 });
 
-makeEnumerateApi(ApiResolver.prototype, 'enumerateMatches', 1);
-
-const _closeIOStream = IOStream.prototype._close;
-IOStream.prototype.close = function () {
-  const stream = this;
-  return new Promise(function (resolve, reject) {
-    _closeIOStream.call(stream, function (error, success) {
-      if (error === null)
-        resolve(success);
-      else
-        reject(error);
-    });
-  });
-};
-
-const _closeInput = InputStream.prototype._close;
-InputStream.prototype.close = function () {
-  const stream = this;
-  return new Promise(function (resolve, reject) {
-    _closeInput.call(stream, function (error, success) {
-      if (error === null)
-        resolve(success);
-      else
-        reject(error);
-    });
-  });
-};
-
-const _read = InputStream.prototype._read;
-InputStream.prototype.read = function (size) {
-  const stream = this;
-  return new Promise(function (resolve, reject) {
-    _read.call(stream, size, function (error, data) {
-      if (error === null)
-        resolve(data);
-      else
-        reject(error);
-    });
-  });
-};
-
-const _readAll = InputStream.prototype._readAll;
-InputStream.prototype.readAll = function (size) {
-  const stream = this;
-  return new Promise(function (resolve, reject) {
-    _readAll.call(stream, size, function (error, data) {
-      if (error === null) {
-        resolve(data);
-      } else {
-        error.partialData = data;
-        reject(error);
-      }
-    });
-  });
-};
-
-const _closeOutput = OutputStream.prototype._close;
-OutputStream.prototype.close = function () {
-  const stream = this;
-  return new Promise(function (resolve, reject) {
-    _closeOutput.call(stream, function (error, success) {
-      if (error === null)
-        resolve(success);
-      else
-        reject(error);
-    });
-  });
-};
-
-const _write = OutputStream.prototype._write;
-OutputStream.prototype.write = function (data) {
-  const stream = this;
-  return new Promise(function (resolve, reject) {
-    _write.call(stream, data, function (error, size) {
-      if (error === null)
-        resolve(size);
-      else
-        reject(error);
-    });
-  });
-};
-
-const _writeAll = OutputStream.prototype._writeAll;
-OutputStream.prototype.writeAll = function (data) {
-  const stream = this;
-  return new Promise(function (resolve, reject) {
-    _writeAll.call(stream, data, function (error, size) {
-      if (error === null) {
-        resolve(size);
-      } else {
-        error.partialSize = size;
-        reject(error);
-      }
-    });
-  });
-};
-
-const _writeMemoryRegion = OutputStream.prototype._writeMemoryRegion;
-OutputStream.prototype.writeMemoryRegion = function (address, length) {
-  const stream = this;
-  return new Promise(function (resolve, reject) {
-    _writeMemoryRegion.call(stream, address, length, function (error, size) {
-      if (error === null) {
-        resolve(size);
-      } else {
-        error.partialSize = size;
-        reject(error);
-      }
-    });
-  });
-};
-
-const _closeListener = SocketListener.prototype._close;
-SocketListener.prototype.close = function () {
-  const listener = this;
-  return new Promise(function (resolve) {
-    _closeListener.call(listener, resolve);
-  });
-};
-
-const _accept = SocketListener.prototype._accept;
-SocketListener.prototype.accept = function () {
-  const listener = this;
-  return new Promise(function (resolve, reject) {
-    _accept.call(listener, function (error, connection) {
-      if (error === null)
-        resolve(connection);
-      else
-        reject(error);
-    });
-  });
-};
-
-const _setNoDelay = SocketConnection.prototype._setNoDelay;
-SocketConnection.prototype.setNoDelay = function (noDelay = true) {
-  const connection = this;
-  return new Promise(function (resolve, reject) {
-    _setNoDelay.call(connection, noDelay, function (error, success) {
-      if (error === null)
-        resolve(success);
-      else
-        reject(error);
-    });
-  });
-};
-
-Object.defineProperties(Socket, {
-  listen: {
-    enumerable: true,
-    value: function (options = {}) {
-      return new Promise(function (resolve, reject) {
-        const {
-          family = null,
-
-          host = null,
-          port = 0,
-
-          type = null,
-          path = null,
-
-          backlog = 10,
-        } = options;
-
-        Socket._listen(family, host, port, type, path, backlog, function (error, listener) {
-          if (error === null)
-            resolve(listener);
-          else
-            reject(error);
-        });
+if ('IOStream' in globalThis) {
+  const _closeIOStream = IOStream.prototype._close;
+  IOStream.prototype.close = function () {
+    const stream = this;
+    return new Promise(function (resolve, reject) {
+      _closeIOStream.call(stream, function (error, success) {
+        if (error === null)
+          resolve(success);
+        else
+          reject(error);
       });
-    },
-  },
-  connect: {
-    enumerable: true,
-    value: function (options) {
-      return new Promise(function (resolve, reject) {
-        const {
-          family = null,
+    });
+  };
 
-          host = 'localhost',
-          port = 0,
-
-          type = null,
-          path = null,
-
-          tls = false,
-        } = options;
-
-        Socket._connect(family, host, port, type, path, tls, function (error, connection) {
-          if (error === null)
-            resolve(connection);
-          else
-            reject(error);
-        });
+  const _closeInput = InputStream.prototype._close;
+  InputStream.prototype.close = function () {
+    const stream = this;
+    return new Promise(function (resolve, reject) {
+      _closeInput.call(stream, function (error, success) {
+        if (error === null)
+          resolve(success);
+        else
+          reject(error);
       });
+    });
+  };
+
+  const _read = InputStream.prototype._read;
+  InputStream.prototype.read = function (size) {
+    const stream = this;
+    return new Promise(function (resolve, reject) {
+      _read.call(stream, size, function (error, data) {
+        if (error === null)
+          resolve(data);
+        else
+          reject(error);
+      });
+    });
+  };
+
+  const _readAll = InputStream.prototype._readAll;
+  InputStream.prototype.readAll = function (size) {
+    const stream = this;
+    return new Promise(function (resolve, reject) {
+      _readAll.call(stream, size, function (error, data) {
+        if (error === null) {
+          resolve(data);
+        } else {
+          error.partialData = data;
+          reject(error);
+        }
+      });
+    });
+  };
+
+  const _closeOutput = OutputStream.prototype._close;
+  OutputStream.prototype.close = function () {
+    const stream = this;
+    return new Promise(function (resolve, reject) {
+      _closeOutput.call(stream, function (error, success) {
+        if (error === null)
+          resolve(success);
+        else
+          reject(error);
+      });
+    });
+  };
+
+  const _write = OutputStream.prototype._write;
+  OutputStream.prototype.write = function (data) {
+    const stream = this;
+    return new Promise(function (resolve, reject) {
+      _write.call(stream, data, function (error, size) {
+        if (error === null)
+          resolve(size);
+        else
+          reject(error);
+      });
+    });
+  };
+
+  const _writeAll = OutputStream.prototype._writeAll;
+  OutputStream.prototype.writeAll = function (data) {
+    const stream = this;
+    return new Promise(function (resolve, reject) {
+      _writeAll.call(stream, data, function (error, size) {
+        if (error === null) {
+          resolve(size);
+        } else {
+          error.partialSize = size;
+          reject(error);
+        }
+      });
+    });
+  };
+
+  const _writeMemoryRegion = OutputStream.prototype._writeMemoryRegion;
+  OutputStream.prototype.writeMemoryRegion = function (address, length) {
+    const stream = this;
+    return new Promise(function (resolve, reject) {
+      _writeMemoryRegion.call(stream, address, length, function (error, size) {
+        if (error === null) {
+          resolve(size);
+        } else {
+          error.partialSize = size;
+          reject(error);
+        }
+      });
+    });
+  };
+
+  const _closeListener = SocketListener.prototype._close;
+  SocketListener.prototype.close = function () {
+    const listener = this;
+    return new Promise(function (resolve) {
+      _closeListener.call(listener, resolve);
+    });
+  };
+
+  const _accept = SocketListener.prototype._accept;
+  SocketListener.prototype.accept = function () {
+    const listener = this;
+    return new Promise(function (resolve, reject) {
+      _accept.call(listener, function (error, connection) {
+        if (error === null)
+          resolve(connection);
+        else
+          reject(error);
+      });
+    });
+  };
+
+  const _setNoDelay = SocketConnection.prototype._setNoDelay;
+  SocketConnection.prototype.setNoDelay = function (noDelay = true) {
+    const connection = this;
+    return new Promise(function (resolve, reject) {
+      _setNoDelay.call(connection, noDelay, function (error, success) {
+        if (error === null)
+          resolve(success);
+        else
+          reject(error);
+      });
+    });
+  };
+
+  Object.defineProperties(Socket, {
+    listen: {
+      enumerable: true,
+      value: function (options = {}) {
+        return new Promise(function (resolve, reject) {
+          const {
+            family = null,
+
+            host = null,
+            port = 0,
+
+            type = null,
+            path = null,
+
+            backlog = 10,
+          } = options;
+
+          Socket._listen(family, host, port, type, path, backlog, function (error, listener) {
+            if (error === null)
+              resolve(listener);
+            else
+              reject(error);
+          });
+        });
+      },
     },
-  },
-});
+    connect: {
+      enumerable: true,
+      value: function (options) {
+        return new Promise(function (resolve, reject) {
+          const {
+            family = null,
+
+            host = 'localhost',
+            port = 0,
+
+            type = null,
+            path = null,
+
+            tls = false,
+          } = options;
+
+          Socket._connect(family, host, port, type, path, tls, function (error, connection) {
+            if (error === null)
+              resolve(connection);
+            else
+              reject(error);
+          });
+        });
+      },
+    },
+  });
+}
 
 SourceMap.prototype.resolve = function (generatedPosition) {
   const generatedColumn = generatedPosition.column;
@@ -808,7 +682,7 @@ SourceMap.prototype.resolve = function (generatedPosition) {
   return {source, line, column, name};
 };
 
-if (engine.SqliteDatabase !== undefined) {
+if ('SqliteDatabase' in globalThis) {
   const sqliteOpenFlags = {
     readonly: 1,
     readwrite: 2,
@@ -873,63 +747,20 @@ Object.defineProperties(Cloak, {
   },
 });
 
-function makeEnumerateApi(mod, name, arity) {
-  const impl = mod['_' + name];
-
-  Object.defineProperty(mod, name, {
-    enumerable: true,
-    value: function (...args) {
-      const callbacks = args[arity];
-      if (callbacks === undefined)
-        return enumerateSync(impl, this, args);
-
-      impl.apply(this, args);
-    }
-  });
-
-  Object.defineProperty(mod, name + 'Sync', {
-    enumerable: true,
-    value: function (...args) {
-      return enumerateSync(impl, this, args);
-    }
-  });
-}
-
-function enumerateSync(impl, self, args) {
-  const items = [];
-  impl.call(self, ...args, {
-    onMatch(item) {
-      items.push(item);
-    },
-    onComplete() {
-    }
-  });
-  return items;
-}
-
 function makeEnumerateRanges(mod) {
   const impl = mod['_enumerateRanges'];
 
   Object.defineProperties(mod, {
     enumerateRanges: {
       enumerable: true,
-      value: function (specifier, callbacks) {
-        if (callbacks === undefined)
-          return enumerateSync(enumerateRanges.bind(this, impl, this), this, [specifier]);
-
-        enumerateRanges(impl, this, specifier, callbacks);
-      }
-    },
-    enumerateRangesSync: {
-      enumerable: true,
-      value: function (specifier) {
-        return enumerateSync(enumerateRanges.bind(this, impl, this), this, [specifier]);
+      value(specifier) {
+        return enumerateRanges(impl, this, specifier);
       }
     },
   });
 }
 
-function enumerateRanges(impl, self, specifier, callbacks) {
+function enumerateRanges(impl, self, specifier) {
   let protection;
   let coalesce = false;
   if (typeof specifier === 'string') {
@@ -939,39 +770,40 @@ function enumerateRanges(impl, self, specifier, callbacks) {
     coalesce = specifier.coalesce;
   }
 
+  const ranges = impl.call(self, protection);
+
   if (coalesce) {
-    const {onMatch, onComplete} = callbacks;
+    const coalesced = [];
+
     let current = null;
-    impl.call(self, protection, {
-      onMatch(r) {
-        if (current !== null) {
-          if (r.base.equals(current.base.add(current.size)) && r.protection === current.protection) {
-            const coalescedRange = {
-              base: current.base,
-              size: current.size + r.size,
-              protection: current.protection
-            };
-            if (current.hasOwnProperty('file'))
-              coalescedRange.file = current.file;
-            Object.freeze(coalescedRange);
-            current = coalescedRange;
-          } else {
-            onMatch(current);
-            current = r;
-          }
+    for (const r of ranges) {
+      if (current !== null) {
+        if (r.base.equals(current.base.add(current.size)) && r.protection === current.protection) {
+          const coalescedRange = {
+            base: current.base,
+            size: current.size + r.size,
+            protection: current.protection
+          };
+          if (current.hasOwnProperty('file'))
+            coalescedRange.file = current.file;
+          Object.freeze(coalescedRange);
+          current = coalescedRange;
         } else {
+          coalesced.push(current);
           current = r;
         }
-      },
-      onComplete() {
-        if (current !== null)
-          onMatch(current);
-        onComplete();
+      } else {
+        current = r;
       }
-    });
-  } else {
-    impl.call(self, protection, callbacks);
+    }
+
+    if (current !== null)
+      coalesced.push(current);
+
+    return coalesced;
   }
+
+  return ranges;
 }
 
 initialize();

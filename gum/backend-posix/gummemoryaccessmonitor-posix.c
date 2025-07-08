@@ -5,8 +5,6 @@
  * Licence: wxWindows Library Licence, Version 3.1
  */
 
-#ifndef GUM_DIET
-
 #include "gummemoryaccessmonitor.h"
 
 #include "gumexceptor.h"
@@ -377,9 +375,11 @@ gum_memory_access_monitor_on_exception (GumExceptionDetails * details,
   if (details->type != GUM_EXCEPTION_ACCESS_VIOLATION)
     return FALSE;
 
+  d.thread_id = details->thread_id;
   d.operation = details->memory.operation;
   d.from = details->address;
   d.address = details->memory.address;
+  d.context = &details->context;
 
   for (i = 0; i != self->pages->len; i++)
   {
@@ -440,5 +440,3 @@ gum_memory_access_monitor_on_exception (GumExceptionDetails * details,
 
   return FALSE;
 }
-
-#endif

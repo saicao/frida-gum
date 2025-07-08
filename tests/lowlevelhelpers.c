@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2008-2022 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2008-2024 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  *
  * Licence: wxWindows Library Licence, Version 3.1
  */
@@ -749,8 +749,11 @@ gum_emit_test_clobber_regs_function (gpointer mem,
       AArch64_REG_X0, G_STRUCT_OFFSET (GumCpuContext, fp));
   for (i = 28; i != -1; i--)
   {
+    gboolean is_platform_register = i == 18;
+    if (is_platform_register)
+      continue;
     gum_arm64_writer_put_ldr_reg_reg_offset (&cw, AArch64_REG_X0 + i,
-        AArch64_REG_X0, G_STRUCT_OFFSET (GumCpuContext, x) + (i * 8));
+        ARM64_REG_X0, G_STRUCT_OFFSET (GumCpuContext, x) + (i * 8));
   }
 
   gum_arm64_writer_put_bl_imm (&cw,
@@ -949,6 +952,14 @@ unsupported_function_list_new (guint * count)
     { "retf",  1, 0, { 0xcb                                           } },
 #elif defined (HAVE_ARM)
     { "ret",   2, 1, { 0x70, 0x47                                     } },
+#elif defined (HAVE_ARM64)
+    { "ret",   12, 0,
+      {
+        0xb0, 0x01, 0x80, 0xd2, /* mov x16, #13 */
+        0xb1, 0x04, 0x80, 0xd2, /* mov x17, #37 */
+        0xc0, 0x03, 0x5f, 0xd6, /* ret          */
+      }
+    },
 #endif
   };
   UnsupportedFunction * result;

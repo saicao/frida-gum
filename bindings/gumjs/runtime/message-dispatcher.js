@@ -1,13 +1,9 @@
-const engine = global;
-
-module.exports = MessageDispatcher;
-
-function MessageDispatcher() {
+export function MessageDispatcher() {
   const messages = [];
   const operations = {};
 
   function initialize() {
-    engine._setIncomingMessageCallback(handleMessage);
+    _setIncomingMessageCallback(handleMessage);
   }
 
   this.registerCallback = function registerCallback(type, callback) {
@@ -26,14 +22,14 @@ function MessageDispatcher() {
   function handleMessage(rawMessage, data) {
     const message = JSON.parse(rawMessage);
     if (message instanceof Array && message[0] === 'frida:rpc') {
-      handleRpcMessage(message[1], message[2], message.slice(3));
+      handleRpcMessage(message[1], message[2], message.slice(3), data);
     } else {
       messages.push([message, data]);
       dispatchMessages();
     }
   }
 
-  function handleRpcMessage(id, operation, params) {
+  function handleRpcMessage(id, operation, params, data) {
     const exports = rpc.exports;
 
     if (operation === 'call') {
@@ -46,7 +42,7 @@ function MessageDispatcher() {
       }
 
       try {
-        const result = exports[method].apply(exports, args);
+        const result = exports[method].call(exports, ...args, data);
         if (typeof result === 'object' && result !== null &&
             typeof result.then === 'function') {
           result
@@ -67,13 +63,15 @@ function MessageDispatcher() {
     }
   }
 
-  function reply(id, type, result, params) {
-    params = params || [];
-
-    if (result instanceof ArrayBuffer)
-      send(['frida:rpc', id, type, {}].concat(params), result);
-    else
-      send(['frida:rpc', id, type, result].concat(params));
+  function reply(id, type, result, params = []) {
+    if (Array.isArray(result) && result.length === 2 && result[1] instanceof ArrayBuffer) {
+      const [value, data] = result;
+      send(['frida:rpc', id, type, undefined, value, ...params], data);
+    } else if (result instanceof ArrayBuffer) {
+      send(['frida:rpc', id, type, undefined, ...params], result);
+    } else {
+      send(['frida:rpc', id, type, result, ...params]);
+    }
   }
 
   function dispatchMessages() {
@@ -109,7 +107,7 @@ function MessageRecvOperation(callback) {
 
   this.wait = function wait() {
     while (!completed)
-      engine._waitForEvent();
+      _waitForEvent();
   };
 
   function complete(message, data) {
@@ -122,4 +120,3 @@ function MessageRecvOperation(callback) {
 
   return [this, complete];
 }
-

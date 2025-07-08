@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2023 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2009-2024 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  * Copyright (C) 2010-2013 Karl Trygve Kalleberg <karltk@boblycat.org>
  *
  * Licence: wxWindows Library Licence, Version 3.1
@@ -31,6 +31,8 @@ TESTLIST_BEGIN (stalker)
   TESTENTRY (call_probe)
   TESTENTRY (custom_transformer)
   TESTENTRY (transformer_should_be_able_to_skip_call)
+  TESTENTRY (transformer_should_be_able_to_replace_call_with_callout)
+  TESTENTRY (transformer_should_be_able_to_replace_tailjump_with_callout)
   TESTENTRY (unfollow_should_be_allowed_before_first_transform)
   TESTENTRY (unfollow_should_be_allowed_mid_first_transform)
   TESTENTRY (unfollow_should_be_allowed_after_first_transform)
@@ -120,6 +122,13 @@ TESTLIST_BEGIN (stalker)
     TESTENTRY (try_and_dont_catch_excluded)
   TESTGROUP_END ()
 #endif
+
+  TESTGROUP_BEGIN ("RunOnThread")
+    TESTENTRY (run_on_thread_current)
+    TESTENTRY (run_on_thread_current_sync)
+    TESTENTRY (run_on_thread_other)
+    TESTENTRY (run_on_thread_other_sync)
+  TESTGROUP_END ()
 TESTLIST_END ()
 
 #ifdef HAVE_LINUX
@@ -142,13 +151,31 @@ struct _PrefetchBackpatchContext
   GumStalker * stalker;
   int pipes[2];
   GumTestStalkerObserver * observer;
-  GumMemoryRange runner_range;
+  const GumMemoryRange * runner_range;
   GumStalkerTransformer * transformer;
   gboolean entry_reached;
   guint count;
 };
 
 #endif
+
+typedef struct _RunOnThreadCtx RunOnThreadCtx;
+typedef struct _TestThreadSyncData TestThreadSyncData;
+
+struct _RunOnThreadCtx
+{
+  GumThreadId caller_id;
+  GumThreadId thread_id;
+};
+
+struct _TestThreadSyncData
+{
+  GMutex mutex;
+  GCond cond;
+  gboolean started;
+  GumThreadId thread_id;
+  gboolean * done;
+};
 
 static gpointer run_stalked_briefly (gpointer data);
 #ifdef HAVE_LINUX
@@ -158,15 +185,18 @@ static gpointer run_stalked_into_termination (gpointer data);
 static void patch_code (gpointer code, gconstpointer new_code, gsize size);
 static void do_patch_instruction (gpointer mem, gpointer user_data);
 #ifndef HAVE_WINDOWS
-static gboolean store_range_of_test_runner (const GumModuleDetails * details,
-    gpointer user_data);
-static void pretend_workload (GumMemoryRange * runner_range);
+static void pretend_workload (const GumMemoryRange * runner_range);
 #endif
 static void insert_extra_increment_after_xor (GumStalkerIterator * iterator,
     GumStalkerOutput * output, gpointer user_data);
 static void store_xax (GumCpuContext * cpu_context, gpointer user_data);
 static void skip_call (GumStalkerIterator * iterator, GumStalkerOutput * output,
     gpointer user_data);
+static void replace_call_with_callout (GumStalkerIterator * iterator,
+    GumStalkerOutput * output, gpointer user_data);
+static void replace_jmp_with_callout (GumStalkerIterator * iterator,
+    GumStalkerOutput * output, gpointer user_data);
+static void callout_set_cool (GumCpuContext * cpu_context, gpointer user_data);
 static void unfollow_during_transform (GumStalkerIterator * iterator,
     GumStalkerOutput * output, gpointer user_data);
 static void modify_to_return_true_after_three_calls (
@@ -190,7 +220,7 @@ static void invoke_unfollow_deep_code (TestStalkerFixture * fixture);
 static void prefetch_on_event (const GumEvent * event,
     GumCpuContext * cpu_context, gpointer user_data);
 static void prefetch_run_child (GumStalker * stalker,
-    GumMemoryRange * runner_range, int compile_fd, int execute_fd);
+    const GumMemoryRange * runner_range, int compile_fd, int execute_fd);
 static void prefetch_activation_target (void);
 static void prefetch_write_blocks (int fd, GHashTable * table);
 static void prefetch_read_blocks (int fd, GHashTable * table);
@@ -199,7 +229,8 @@ static void prefetch_backpatch_tranform (GumStalkerIterator * iterator,
     GumStalkerOutput * output, gpointer user_data);
 static void entry_callout (GumCpuContext * cpu_context, gpointer user_data);
 static int prefetch_on_fork (void);
-static void prefetch_backpatch_simple_workload (GumMemoryRange * runner_range);
+static void prefetch_backpatch_simple_workload (
+    const GumMemoryRange * runner_range);
 
 static void gum_test_stalker_observer_iface_init (gpointer g_iface,
     gpointer iface_data);
@@ -238,6 +269,12 @@ void test_check_bit (guint32 * val, guint8 bit);
 void test_try_and_catch (guint32 * val);
 void test_try_and_dont_catch (guint32 * val);
 #endif
+
+static void run_on_thread (const GumCpuContext * cpu_context,
+    gpointer user_data);
+static GThread * create_sleeping_dummy_thread_sync (gboolean * done,
+    GumThreadId * thread_id);
+static gpointer sleeping_dummy (gpointer data);
 
 static const guint8 flat_code[] = {
   0x33, 0xc0, /* xor eax, eax */
@@ -525,21 +562,14 @@ do_patch_instruction (gpointer mem,
 
 TESTCASE (performance)
 {
-  GumMemoryRange runner_range;
   GTimer * timer;
   gdouble duration_direct, duration_stalked;
 
-  runner_range.base_address = 0;
-  runner_range.size = 0;
-  gum_process_enumerate_modules (store_range_of_test_runner, &runner_range);
-  g_assert_cmpuint (runner_range.base_address, !=, 0);
-  g_assert_cmpuint (runner_range.size, !=, 0);
-
   timer = g_timer_new ();
-  pretend_workload (&runner_range);
+  pretend_workload (fixture->runner_range);
 
   g_timer_reset (timer);
-  pretend_workload (&runner_range);
+  pretend_workload (fixture->runner_range);
   duration_direct = g_timer_elapsed (timer, NULL);
 
   fixture->sink->mask = GUM_NOTHING;
@@ -550,12 +580,12 @@ TESTCASE (performance)
 
   /* warm-up */
   g_timer_reset (timer);
-  pretend_workload (&runner_range);
+  pretend_workload (fixture->runner_range);
   g_timer_elapsed (timer, NULL);
 
   /* the real deal */
   g_timer_reset (timer);
-  pretend_workload (&runner_range);
+  pretend_workload (fixture->runner_range);
   duration_stalked = g_timer_elapsed (timer, NULL);
 
   gum_stalker_unfollow_me (fixture->stalker);
@@ -566,23 +596,8 @@ TESTCASE (performance)
       duration_direct, duration_stalked, duration_stalked / duration_direct);
 }
 
-static gboolean
-store_range_of_test_runner (const GumModuleDetails * details,
-                            gpointer user_data)
-{
-  GumMemoryRange * runner_range = user_data;
-
-  if (strstr (details->name, "gum-tests") != NULL)
-  {
-    *runner_range = *details->range;
-    return FALSE;
-  }
-
-  return TRUE;
-}
-
 GUM_NOINLINE static void
-pretend_workload (GumMemoryRange * runner_range)
+pretend_workload (const GumMemoryRange * runner_range)
 {
   lzma_stream stream = LZMA_STREAM_INIT;
   const uint32_t preset = 9 | LZMA_PRESET_EXTREME;
@@ -972,6 +987,102 @@ skip_call (GumStalkerIterator * iterator,
 
     gum_stalker_iterator_keep (iterator);
   }
+}
+
+TESTCASE (transformer_should_be_able_to_replace_call_with_callout)
+{
+  guint8 code_template[] =
+  {
+    0xb8, 0x14, 0x05, 0x00, 0x00, /* mov eax, 1300    */
+    0xe8, 0x01, 0x00, 0x00, 0x00, /* call bump_number */
+    0xc3,                         /* ret              */
+    /* bump_number:                                   */
+    0x83, 0xc0, 0x25,             /* add eax, 37      */
+    0xc3,                         /* ret              */
+  };
+  StalkerTestFunc func;
+  gint ret;
+
+  func = (StalkerTestFunc) test_stalker_fixture_dup_code (fixture,
+      code_template, sizeof (code_template));
+
+  fixture->transformer = gum_stalker_transformer_make_from_callback (
+      replace_call_with_callout, func, NULL);
+
+  ret = test_stalker_fixture_follow_and_invoke (fixture, func, 0);
+  g_assert_cmpuint (ret, ==, 0xc001);
+}
+
+static void
+replace_call_with_callout (GumStalkerIterator * iterator,
+                           GumStalkerOutput * output,
+                           gpointer user_data)
+{
+  const guint8 * func_start = user_data;
+  const cs_insn * insn;
+
+  while (gum_stalker_iterator_next (iterator, &insn))
+  {
+    if (insn->address == GPOINTER_TO_SIZE (func_start + 5))
+    {
+      gum_stalker_iterator_put_callout (iterator, callout_set_cool, NULL, NULL);
+      continue;
+    }
+
+    gum_stalker_iterator_keep (iterator);
+  }
+}
+
+TESTCASE (transformer_should_be_able_to_replace_tailjump_with_callout)
+{
+  guint8 code_template[] =
+  {
+    0xb8, 0x14, 0x05, 0x00, 0x00, /* mov eax, 1300   */
+    0xeb, 0x01,                   /* jmp bump_number */
+    0x90,                         /* nop             */
+    /* bump_number:                                  */
+    0x83, 0xc0, 0x25,             /* add eax, 37     */
+    0xc3,                         /* ret             */
+  };
+  StalkerTestFunc func;
+  gint ret;
+
+  func = (StalkerTestFunc) test_stalker_fixture_dup_code (fixture,
+      code_template, sizeof (code_template));
+
+  fixture->transformer = gum_stalker_transformer_make_from_callback (
+      replace_jmp_with_callout, func, NULL);
+
+  ret = test_stalker_fixture_follow_and_invoke (fixture, func, 0);
+  g_assert_cmpuint (ret, ==, 0xc001);
+}
+
+static void
+replace_jmp_with_callout (GumStalkerIterator * iterator,
+                          GumStalkerOutput * output,
+                          gpointer user_data)
+{
+  const guint8 * func_start = user_data;
+  const cs_insn * insn;
+
+  while (gum_stalker_iterator_next (iterator, &insn))
+  {
+    if (insn->address == GPOINTER_TO_SIZE (func_start + 5))
+    {
+      gum_stalker_iterator_put_callout (iterator, callout_set_cool, NULL, NULL);
+      gum_stalker_iterator_put_chaining_return (iterator);
+      continue;
+    }
+
+    gum_stalker_iterator_keep (iterator);
+  }
+}
+
+static void
+callout_set_cool (GumCpuContext * cpu_context,
+                  gpointer user_data)
+{
+  GUM_CPU_CONTEXT_XAX (cpu_context) = 0xc001;
 }
 
 TESTCASE (unfollow_should_be_allowed_before_first_transform)
@@ -2562,7 +2673,7 @@ typedef void (* TestWindowMessageHandler) (TestWindow * window,
 
 struct _TestWindow
 {
-  LPTSTR klass;
+  ATOM klass;
   HWND handle;
   GumStalker * stalker;
 
@@ -2692,7 +2803,7 @@ static TestWindow *
 create_test_window (GumStalker * stalker)
 {
   TestWindow * window;
-  WNDCLASS wc = { 0, };
+  WNDCLASSW wc = { 0, };
 
   window = g_slice_new (TestWindow);
 
@@ -2700,17 +2811,17 @@ create_test_window (GumStalker * stalker)
 
   wc.lpfnWndProc = test_window_proc;
   wc.hInstance = GetModuleHandle (NULL);
-  wc.lpszClassName = _T ("GumTestWindowClass");
-  window->klass = (LPTSTR) GSIZE_TO_POINTER (RegisterClass (&wc));
-  g_assert_nonnull (window->klass);
+  wc.lpszClassName = L"GumTestWindowClass";
+  window->klass = RegisterClassW (&wc);
+  g_assert_cmpuint (window->klass, !=, 0);
 
 #ifdef _MSC_VER
 # pragma warning (push)
 # pragma warning (disable: 4306)
 #endif
-  window->handle = CreateWindow (window->klass, _T ("GumTestWindow"),
+  window->handle = CreateWindowW ((LPCWSTR) window->klass, L"GumTestWindow",
       WS_CAPTION, 10, 10, 320, 240, HWND_MESSAGE, NULL,
-      GetModuleHandle (NULL), NULL);
+      GetModuleHandleW (NULL), NULL);
 #ifdef _MSC_VER
 # pragma warning (pop)
 #endif
@@ -2725,7 +2836,8 @@ create_test_window (GumStalker * stalker)
 static void
 destroy_test_window (TestWindow * window)
 {
-  g_assert_true (UnregisterClass (window->klass, GetModuleHandle (NULL)));
+  g_assert_true (UnregisterClassW ((LPCWSTR) window->klass,
+        GetModuleHandleW (NULL)));
 
   g_slice_free (TestWindow, window);
 }
@@ -2783,7 +2895,6 @@ test_window_proc (HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 
 TESTCASE (prefetch)
 {
-  GumMemoryRange runner_range;
   gint trust;
   int compile_pipes[2] = { -1, -1 };
   int execute_pipes[2] = { -1, -1 };
@@ -2804,13 +2915,6 @@ TESTCASE (prefetch)
     g_print ("<skipping, run in slow mode> ");
     return;
   }
-
-  /* Initialize workload parameters */
-  runner_range.base_address = 0;
-  runner_range.size = 0;
-  gum_process_enumerate_modules (store_range_of_test_runner, &runner_range);
-  g_assert_cmpuint (runner_range.base_address, !=, 0);
-  g_assert_cmpuint (runner_range.size, !=, 0);
 
   /* Initialize Stalker */
   gum_stalker_set_trust_threshold (fixture->stalker, 3);
@@ -2844,7 +2948,7 @@ TESTCASE (prefetch)
   gum_stalker_deactivate (fixture->stalker);
 
   /* Run the child */
-  prefetch_run_child (fixture->stalker, &runner_range,
+  prefetch_run_child (fixture->stalker, fixture->runner_range,
       compile_pipes[STDOUT_FILENO], execute_pipes[STDOUT_FILENO]);
 
   /* Read the results */
@@ -2872,7 +2976,7 @@ TESTCASE (prefetch)
   }
 
   /* Run the child again */
-  prefetch_run_child (fixture->stalker, &runner_range,
+  prefetch_run_child (fixture->stalker, fixture->runner_range,
       compile_pipes[STDOUT_FILENO], execute_pipes[STDOUT_FILENO]);
 
   /* Read the results */
@@ -2939,7 +3043,7 @@ prefetch_on_event (const GumEvent * event,
 
 static void
 prefetch_run_child (GumStalker * stalker,
-                    GumMemoryRange * runner_range,
+                    const GumMemoryRange * runner_range,
                     int compile_fd,
                     int execute_fd)
 {
@@ -3035,21 +3139,18 @@ TESTCASE (prefetch_backpatch)
       pipe_size);
 
   bp_ctx.observer = g_object_new (GUM_TYPE_TEST_STALKER_OBSERVER, NULL);
-
-  gum_process_enumerate_modules (store_range_of_test_runner,
-      &bp_ctx.runner_range);
-  g_assert_cmpuint (bp_ctx.runner_range.base_address, !=, 0);
-  g_assert_cmpuint (bp_ctx.runner_range.size, !=, 0);
-
+  bp_ctx.runner_range = fixture->runner_range;
   bp_ctx.transformer = gum_stalker_transformer_make_from_callback (
       prefetch_backpatch_tranform, NULL, NULL);
 
-  fork_addr = GSIZE_TO_POINTER (gum_module_find_export_by_name (NULL, "fork"));
+  fork_addr = GSIZE_TO_POINTER (gum_module_find_global_export_by_name ("fork"));
   interceptor = gum_interceptor_obtain ();
   gum_interceptor_begin_transaction (interceptor);
   g_assert_cmpint (gum_interceptor_replace (interceptor, fork_addr,
       prefetch_on_fork, NULL, NULL), ==, GUM_REPLACE_OK);
   gum_interceptor_end_transaction (interceptor);
+
+  g_object_unref (interceptor);
 
   gum_stalker_set_trust_threshold (fixture->stalker, 0);
 
@@ -3063,7 +3164,7 @@ TESTCASE (prefetch_backpatch)
    * the system). So we use a relatively simple workload so that we don't
    * saturate it.
    */
-  prefetch_backpatch_simple_workload (&bp_ctx.runner_range);
+  prefetch_backpatch_simple_workload (bp_ctx.runner_range);
 
   _exit (0);
 }
@@ -3168,7 +3269,7 @@ prefetch_on_fork (void)
 }
 
 GUM_NOINLINE static void
-prefetch_backpatch_simple_workload (GumMemoryRange * runner_range)
+prefetch_backpatch_simple_workload (const GumMemoryRange * runner_range)
 {
   const guint8 * buf;
   gsize limit, i;
@@ -3285,21 +3386,14 @@ get_max_pipe_size (void)
 
 TESTCASE (ic_var)
 {
-  GumMemoryRange runner_range;
   GumStalker * stalker;
-
-  runner_range.base_address = 0;
-  runner_range.size = 0;
-  gum_process_enumerate_modules (store_range_of_test_runner, &runner_range);
-  g_assert_cmpuint (runner_range.base_address, !=, 0);
-  g_assert_cmpuint (runner_range.size, !=, 0);
 
   stalker = g_object_new (GUM_TYPE_STALKER,
       "ic-entries", 32,
       NULL);
 
   gum_stalker_follow_me (stalker, NULL, NULL);
-  pretend_workload (&runner_range);
+  pretend_workload (fixture->runner_range);
   gum_stalker_unfollow_me (stalker);
 
   while (gum_stalker_garbage_collect (stalker))
@@ -3482,3 +3576,144 @@ test_check_followed (void)
 }
 
 #endif
+
+TESTCASE (run_on_thread_current)
+{
+  GumThreadId thread_id;
+  RunOnThreadCtx ctx;
+  gboolean accepted;
+
+  thread_id = gum_process_get_current_thread_id ();
+  ctx.caller_id = thread_id;
+  ctx.thread_id = G_MAXSIZE;
+
+  accepted = gum_stalker_run_on_thread (fixture->stalker, thread_id,
+      run_on_thread, &ctx, NULL);
+  g_assert_true (accepted);
+  g_assert_cmpuint (ctx.thread_id, ==, thread_id);
+}
+
+TESTCASE (run_on_thread_current_sync)
+{
+  GumThreadId thread_id;
+  RunOnThreadCtx ctx;
+  gboolean accepted;
+
+  thread_id = gum_process_get_current_thread_id ();
+  ctx.caller_id = thread_id;
+  ctx.thread_id = G_MAXSIZE;
+
+  accepted = gum_stalker_run_on_thread_sync (fixture->stalker, thread_id,
+      run_on_thread, &ctx);
+  g_assert_true (accepted);
+  g_assert_cmpuint (thread_id, ==, ctx.thread_id);
+}
+
+static void
+run_on_thread (const GumCpuContext * cpu_context,
+               gpointer user_data)
+{
+  RunOnThreadCtx * ctx = user_data;
+
+  g_usleep (250000);
+  ctx->thread_id = gum_process_get_current_thread_id ();
+
+  if (ctx->thread_id == ctx->caller_id)
+    g_assert_null (cpu_context);
+  else
+    g_assert_nonnull (cpu_context);
+}
+
+TESTCASE (run_on_thread_other)
+{
+  GThread * thread;
+  gboolean done = FALSE;
+  GumThreadId other_id, this_id;
+  RunOnThreadCtx ctx;
+  gboolean accepted;
+
+  thread = create_sleeping_dummy_thread_sync (&done, &other_id);
+
+  this_id = gum_process_get_current_thread_id ();
+  g_assert_cmphex (this_id, !=, other_id);
+  ctx.caller_id = this_id;
+  ctx.thread_id = G_MAXSIZE;
+
+  accepted = gum_stalker_run_on_thread (fixture->stalker, other_id,
+      run_on_thread, &ctx, NULL);
+  g_assert_true (accepted);
+  done = TRUE;
+  g_thread_join (thread);
+  g_assert_cmphex (ctx.thread_id, ==, other_id);
+}
+
+TESTCASE (run_on_thread_other_sync)
+{
+  GThread * thread;
+  gboolean done = FALSE;
+  GumThreadId other_id, this_id;
+  RunOnThreadCtx ctx;
+  gboolean accepted;
+
+  thread = create_sleeping_dummy_thread_sync (&done, &other_id);
+
+  this_id = gum_process_get_current_thread_id ();
+  g_assert_cmphex (this_id, !=, other_id);
+  ctx.caller_id = this_id;
+  ctx.thread_id = G_MAXSIZE;
+
+  accepted = gum_stalker_run_on_thread_sync (fixture->stalker, other_id,
+      run_on_thread, &ctx);
+  g_assert_true (accepted);
+  done = TRUE;
+  g_thread_join (thread);
+  g_assert_cmpuint (ctx.thread_id, ==, other_id);
+}
+
+static GThread *
+create_sleeping_dummy_thread_sync (gboolean * done,
+                                   GumThreadId * thread_id)
+{
+  GThread * thread;
+  TestThreadSyncData sync_data;
+
+  g_mutex_init (&sync_data.mutex);
+  g_cond_init (&sync_data.cond);
+  sync_data.started = FALSE;
+  sync_data.thread_id = 0;
+  sync_data.done = done;
+
+  g_mutex_lock (&sync_data.mutex);
+
+  thread = g_thread_new ("sleepy", sleeping_dummy, &sync_data);
+
+  while (!sync_data.started)
+    g_cond_wait (&sync_data.cond, &sync_data.mutex);
+
+  *thread_id = sync_data.thread_id;
+
+  g_mutex_unlock (&sync_data.mutex);
+
+  g_cond_clear (&sync_data.cond);
+  g_mutex_clear (&sync_data.mutex);
+
+  return thread;
+}
+
+static gpointer
+sleeping_dummy (gpointer data)
+{
+  TestThreadSyncData * sync_data = data;
+  gboolean * done = sync_data->done;
+
+  g_mutex_lock (&sync_data->mutex);
+  sync_data->started = TRUE;
+  sync_data->thread_id = gum_process_get_current_thread_id ();
+  g_cond_signal (&sync_data->cond);
+  g_mutex_unlock (&sync_data->mutex);
+
+  while (!(*done))
+    g_thread_yield ();
+
+  return NULL;
+}

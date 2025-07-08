@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2023 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2009-2024 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  * Copyright (C) 2017 Antonio Ken Iannillo <ak.iannillo@gmail.com>
  * Copyright (C) 2023 Håvard Sørbø <havard@hsorbo.no>
  *
@@ -32,6 +32,8 @@ TESTLIST_BEGIN (stalker)
   /* TRANSFORMERS */
   TESTENTRY (custom_transformer)
   TESTENTRY (transformer_should_be_able_to_skip_call)
+  TESTENTRY (transformer_should_be_able_to_replace_call_with_callout)
+  TESTENTRY (transformer_should_be_able_to_replace_tailjump_with_callout)
   TESTENTRY (unfollow_should_be_allowed_before_first_transform)
   TESTENTRY (unfollow_should_be_allowed_mid_first_transform)
   TESTENTRY (unfollow_should_be_allowed_after_first_transform)
@@ -71,7 +73,9 @@ TESTLIST_BEGIN (stalker)
   TESTENTRY (exclusive_load_store_should_not_be_disturbed)
 
   /* EXTRA */
+#ifndef HAVE_WINDOWS
   TESTENTRY (pthread_create)
+#endif
   TESTENTRY (heap_api)
   TESTENTRY (no_register_clobber)
   TESTENTRY (performance)
@@ -80,6 +84,13 @@ TESTLIST_BEGIN (stalker)
   TESTENTRY (prefetch)
   TESTENTRY (observer)
 #endif
+
+  TESTGROUP_BEGIN ("RunOnThread")
+    TESTENTRY (run_on_thread_current)
+    TESTENTRY (run_on_thread_current_sync)
+    TESTENTRY (run_on_thread_other)
+    TESTENTRY (run_on_thread_other_sync)
+  TESTGROUP_END ()
 TESTLIST_END ()
 
 #ifdef HAVE_LINUX
@@ -93,11 +104,34 @@ struct _GumTestStalkerObserver
 
 #endif
 
+typedef struct _RunOnThreadCtx RunOnThreadCtx;
+typedef struct _TestThreadSyncData TestThreadSyncData;
+
+struct _RunOnThreadCtx
+{
+  GumThreadId caller_id;
+  GumThreadId thread_id;
+};
+
+struct _TestThreadSyncData
+{
+  GMutex mutex;
+  GCond cond;
+  gboolean started;
+  GumThreadId thread_id;
+  gboolean * done;
+};
+
 static void insert_extra_add_after_sub (GumStalkerIterator * iterator,
     GumStalkerOutput * output, gpointer user_data);
 static void store_x0 (GumCpuContext * cpu_context, gpointer user_data);
 static void skip_call (GumStalkerIterator * iterator, GumStalkerOutput * output,
     gpointer user_data);
+static void replace_call_with_callout (GumStalkerIterator * iterator,
+    GumStalkerOutput * output, gpointer user_data);
+static void replace_jmp_with_callout (GumStalkerIterator * iterator,
+    GumStalkerOutput * output, gpointer user_data);
+static void callout_set_cool (GumCpuContext * cpu_context, gpointer user_data);
 static void unfollow_during_transform (GumStalkerIterator * iterator,
     GumStalkerOutput * output, gpointer user_data);
 static gboolean test_is_finished (void);
@@ -124,10 +158,10 @@ static void bump_num_cmp_callouts (GumCpuContext * cpu_context,
     gpointer user_data);
 static void patch_instruction (gpointer code, guint offset, guint32 insn);
 static void do_patch_instruction (gpointer mem, gpointer user_data);
+#ifndef HAVE_WINDOWS
 static gpointer increment_integer (gpointer data);
-static gboolean store_range_of_test_runner (const GumModuleDetails * details,
-    gpointer user_data);
-static void pretend_workload (GumMemoryRange * runner_range);
+#endif
+static void pretend_workload (const GumMemoryRange * runner_range);
 
 volatile gboolean stalker_invalidation_test_is_finished = FALSE;
 volatile gint stalker_invalidation_magic_number = 42;
@@ -136,7 +170,7 @@ volatile gint stalker_invalidation_magic_number = 42;
 static void prefetch_on_event (const GumEvent * event,
     GumCpuContext * cpu_context, gpointer user_data);
 static void prefetch_run_child (GumStalker * stalker,
-    GumMemoryRange * runner_range, int compile_fd, int execute_fd);
+    const GumMemoryRange * runner_range, int compile_fd, int execute_fd);
 static void prefetch_activation_target (void);
 static void prefetch_write_blocks (int fd, GHashTable * table);
 static void prefetch_read_blocks (int fd, GHashTable * table);
@@ -164,11 +198,17 @@ G_DEFINE_TYPE_EXTENDED (GumTestStalkerObserver,
                             gum_test_stalker_observer_iface_init))
 #endif
 
+static void run_on_thread (const GumCpuContext * cpu_context,
+    gpointer user_data);
+static GThread * create_sleeping_dummy_thread_sync (gboolean * done,
+    GumThreadId * thread_id);
+static gpointer sleeping_dummy (gpointer data);
+
 static const guint32 flat_code[] = {
-    0xcb000000, /* sub w0, w0, w0 */
-    0x91000400, /* add w0, w0, #1 */
-    0x91000400, /* add w0, w0, #1 */
-    0xd65f03c0  /* ret            */
+    GUINT32_TO_LE (0xcb000000), /* sub w0, w0, w0 */
+    GUINT32_TO_LE (0x91000400), /* add w0, w0, #1 */
+    GUINT32_TO_LE (0x91000400), /* add w0, w0, #1 */
+    GUINT32_TO_LE (0xd65f03c0)  /* ret            */
 };
 
 static StalkerTestFunc
@@ -230,7 +270,8 @@ TESTCASE (ret)
 
   ev = &g_array_index (fixture->sink->events, GumEvent, 0).ret;
 
-  GUM_ASSERT_CMPADDR (ev->location, ==, gum_strip_code_pointer (func) + 3 * 4);
+  GUM_ASSERT_CMPADDR (ev->location, ==,
+      (guint8 *) gum_strip_code_pointer (func) + 3 * 4);
   GUM_ASSERT_CMPADDR (ev->target, ==, fixture->last_invoke_retaddr);
 }
 
@@ -329,30 +370,30 @@ TESTCASE (call_probe)
 {
   const guint32 code_template[] =
   {
-    0xa9bf7bf3, /* push {x19, lr} */
-    0xd2801553, /* mov x19, #0xaa */
-    0xd2800883, /* mov x3, #0x44  */
-    0xd2800662, /* mov x2, #0x33  */
-    0xd2800441, /* mov x1, #0x22  */
-    0xd2800220, /* mov x0, #0x11  */
-    0xa9bf07e0, /* push {x0, x1}  */
-    0x94000009, /* bl func_a      */
-    0xa8c107e0, /* pop {x0, x1}   */
-    0xd2801103, /* mov x3, #0x88  */
-    0xd2800ee2, /* mov x2, #0x77  */
-    0xd2800cc1, /* mov x1, #0x66  */
-    0xd2800aa0, /* mov x0, #0x55  */
-    0x94000005, /* bl func_b      */
-    0xa8c17bf3, /* pop {x19, lr}  */
-    0xd65f03c0, /* ret            */
+    GUINT32_TO_LE (0xa9bf7bf3), /* push {x19, lr} */
+    GUINT32_TO_LE (0xd2801553), /* mov x19, #0xaa */
+    GUINT32_TO_LE (0xd2800883), /* mov x3, #0x44  */
+    GUINT32_TO_LE (0xd2800662), /* mov x2, #0x33  */
+    GUINT32_TO_LE (0xd2800441), /* mov x1, #0x22  */
+    GUINT32_TO_LE (0xd2800220), /* mov x0, #0x11  */
+    GUINT32_TO_LE (0xa9bf07e0), /* push {x0, x1}  */
+    GUINT32_TO_LE (0x94000009), /* bl func_a      */
+    GUINT32_TO_LE (0xa8c107e0), /* pop {x0, x1}   */
+    GUINT32_TO_LE (0xd2801103), /* mov x3, #0x88  */
+    GUINT32_TO_LE (0xd2800ee2), /* mov x2, #0x77  */
+    GUINT32_TO_LE (0xd2800cc1), /* mov x1, #0x66  */
+    GUINT32_TO_LE (0xd2800aa0), /* mov x0, #0x55  */
+    GUINT32_TO_LE (0x94000005), /* bl func_b      */
+    GUINT32_TO_LE (0xa8c17bf3), /* pop {x19, lr}  */
+    GUINT32_TO_LE (0xd65f03c0), /* ret            */
 
     /* func_a: */
-    0xd2801100, /* mov x0, #0x88  */
-    0xd65f03c0, /* ret            */
+    GUINT32_TO_LE (0xd2801100), /* mov x0, #0x88  */
+    GUINT32_TO_LE (0xd65f03c0), /* ret            */
 
     /* func_b: */
-    0xd2801320, /* mov x0, #0x99  */
-    0xd65f03c0, /* ret            */
+    GUINT32_TO_LE (0xd2801320), /* mov x0, #0x99  */
+    GUINT32_TO_LE (0xd65f03c0), /* ret            */
   };
   StalkerTestFunc func;
   guint8 * func_a;
@@ -474,14 +515,14 @@ TESTCASE (transformer_should_be_able_to_skip_call)
 {
   guint32 code_template[] =
   {
-    0xa9bf7bfd, /* push {x29, x30} */
-    0xd280a280, /* mov x0, #1300   */
-    0x94000003, /* bl bump_number  */
-    0xa8c17bfd, /* pop {x29, x30}  */
-    0xd65f03c0, /* ret             */
+    GUINT32_TO_LE (0xa9bf7bfd), /* push {x29, x30} */
+    GUINT32_TO_LE (0xd280a280), /* mov x0, #1300   */
+    GUINT32_TO_LE (0x94000003), /* bl bump_number  */
+    GUINT32_TO_LE (0xa8c17bfd), /* pop {x29, x30}  */
+    GUINT32_TO_LE (0xd65f03c0), /* ret             */
     /* bump_number:                */
-    0x91009400, /* add x0, x0, #37 */
-    0xd65f03c0, /* ret             */
+    GUINT32_TO_LE (0x91009400), /* add x0, x0, #37 */
+    GUINT32_TO_LE (0xd65f03c0), /* ret             */
   };
   StalkerTestFunc func;
   gint ret;
@@ -511,6 +552,103 @@ skip_call (GumStalkerIterator * iterator,
 
     gum_stalker_iterator_keep (iterator);
   }
+}
+
+TESTCASE (transformer_should_be_able_to_replace_call_with_callout)
+{
+  guint32 code_template[] =
+  {
+    GUINT32_TO_LE (0xa9bf7bfd), /* push {x29, x30} */
+    GUINT32_TO_LE (0xd280a280), /* mov x0, #1300   */
+    GUINT32_TO_LE (0x94000003), /* bl bump_number  */
+    GUINT32_TO_LE (0xa8c17bfd), /* pop {x29, x30}  */
+    GUINT32_TO_LE (0xd65f03c0), /* ret             */
+    /* bump_number:                */
+    GUINT32_TO_LE (0x91009400), /* add x0, x0, #37 */
+    GUINT32_TO_LE (0xd65f03c0), /* ret             */
+  };
+  StalkerTestFunc func;
+  gint ret;
+
+  func = (StalkerTestFunc) test_arm64_stalker_fixture_dup_code (fixture,
+      code_template, sizeof (code_template));
+
+  fixture->transformer = gum_stalker_transformer_make_from_callback (
+      replace_call_with_callout, func, NULL);
+
+  ret = test_arm64_stalker_fixture_follow_and_invoke (fixture, func, 0);
+  g_assert_cmpuint (ret, ==, 0xc001);
+}
+
+static void
+replace_call_with_callout (GumStalkerIterator * iterator,
+                           GumStalkerOutput * output,
+                           gpointer user_data)
+{
+  const guint32 * func_start = user_data;
+  const cs_insn * insn;
+
+  while (gum_stalker_iterator_next (iterator, &insn))
+  {
+    if (insn->address == GPOINTER_TO_SIZE (func_start + 2))
+    {
+      gum_stalker_iterator_put_callout (iterator, callout_set_cool, NULL, NULL);
+      continue;
+    }
+
+    gum_stalker_iterator_keep (iterator);
+  }
+}
+
+TESTCASE (transformer_should_be_able_to_replace_tailjump_with_callout)
+{
+  guint32 code_template[] =
+  {
+    GUINT32_TO_LE (0xd280a280), /* mov x0, #1300   */
+    GUINT32_TO_LE (0x14000001), /* b bump_number   */
+    /* bump_number:                */
+    GUINT32_TO_LE (0x91009400), /* add x0, x0, #37 */
+    GUINT32_TO_LE (0xd65f03c0), /* ret             */
+  };
+  StalkerTestFunc func;
+  gint ret;
+
+  func = (StalkerTestFunc) test_arm64_stalker_fixture_dup_code (fixture,
+      code_template, sizeof (code_template));
+
+  fixture->transformer = gum_stalker_transformer_make_from_callback (
+      replace_jmp_with_callout, func, NULL);
+
+  ret = test_arm64_stalker_fixture_follow_and_invoke (fixture, func, 0);
+  g_assert_cmpuint (ret, ==, 0xc001);
+}
+
+static void
+replace_jmp_with_callout (GumStalkerIterator * iterator,
+                          GumStalkerOutput * output,
+                          gpointer user_data)
+{
+  const guint32 * func_start = user_data;
+  const cs_insn * insn;
+
+  while (gum_stalker_iterator_next (iterator, &insn))
+  {
+    if (insn->address == GPOINTER_TO_SIZE (func_start + 1))
+    {
+      gum_stalker_iterator_put_callout (iterator, callout_set_cool, NULL, NULL);
+      gum_stalker_iterator_put_chaining_return (iterator);
+      continue;
+    }
+
+    gum_stalker_iterator_keep (iterator);
+  }
+}
+
+static void
+callout_set_cool (GumCpuContext * cpu_context,
+                  gpointer user_data)
+{
+  cpu_context->x[0] = 0xc001;
 }
 
 TESTCASE (unfollow_should_be_allowed_before_first_transform)
@@ -912,30 +1050,30 @@ TESTCASE (exclude_bl)
 {
   const guint32 code_template[] =
   {
-    0xa9bf7bf3, /* push {x19, lr} */
-    0xd2801553, /* mov x19, #0xaa */
-    0xd2800883, /* mov x3, #0x44  */
-    0xd2800662, /* mov x2, #0x33  */
-    0xd2800441, /* mov x1, #0x22  */
-    0xd2800220, /* mov x0, #0x11  */
-    0xa9bf07e0, /* push {x0, x1}  */
-    0x94000009, /* bl func_a      */
-    0xa8c107e0, /* pop {x0, x1}   */
-    0xd2801103, /* mov x3, #0x88  */
-    0xd2800ee2, /* mov x2, #0x77  */
-    0xd2800cc1, /* mov x1, #0x66  */
-    0xd2800aa0, /* mov x0, #0x55  */
-    0x94000005, /* bl func_b      */
-    0xa8c17bf3, /* pop {x19, lr}  */
-    0xd65f03c0, /* ret            */
+    GUINT32_TO_LE (0xa9bf7bf3), /* push {x19, lr} */
+    GUINT32_TO_LE (0xd2801553), /* mov x19, #0xaa */
+    GUINT32_TO_LE (0xd2800883), /* mov x3, #0x44  */
+    GUINT32_TO_LE (0xd2800662), /* mov x2, #0x33  */
+    GUINT32_TO_LE (0xd2800441), /* mov x1, #0x22  */
+    GUINT32_TO_LE (0xd2800220), /* mov x0, #0x11  */
+    GUINT32_TO_LE (0xa9bf07e0), /* push {x0, x1}  */
+    GUINT32_TO_LE (0x94000009), /* bl func_a      */
+    GUINT32_TO_LE (0xa8c107e0), /* pop {x0, x1}   */
+    GUINT32_TO_LE (0xd2801103), /* mov x3, #0x88  */
+    GUINT32_TO_LE (0xd2800ee2), /* mov x2, #0x77  */
+    GUINT32_TO_LE (0xd2800cc1), /* mov x1, #0x66  */
+    GUINT32_TO_LE (0xd2800aa0), /* mov x0, #0x55  */
+    GUINT32_TO_LE (0x94000005), /* bl func_b      */
+    GUINT32_TO_LE (0xa8c17bf3), /* pop {x19, lr}  */
+    GUINT32_TO_LE (0xd65f03c0), /* ret            */
 
     /* func_a: */
-    0xd2801100, /* mov x0, #0x88  */
-    0xd65f03c0, /* ret            */
+    GUINT32_TO_LE (0xd2801100), /* mov x0, #0x88  */
+    GUINT32_TO_LE (0xd65f03c0), /* ret            */
 
     /* func_b: */
-    0xd2801320, /* mov x0, #0x99  */
-    0xd65f03c0, /* ret            */
+    GUINT32_TO_LE (0xd2801320), /* mov x0, #0x99  */
+    GUINT32_TO_LE (0xd65f03c0), /* ret            */
   };
   StalkerTestFunc func;
   guint8 * func_a_address;
@@ -947,7 +1085,7 @@ TESTCASE (exclude_bl)
       code_template, sizeof (code_template));
 
   func_a_address = fixture->code + (16 * 4);
-  memory_range.base_address = (GumAddress) func_a_address;
+  memory_range.base_address = GUM_ADDRESS (func_a_address);
   memory_range.size = 4 * 2;
   gum_stalker_exclude (fixture->stalker, &memory_range);
 
@@ -1534,27 +1672,27 @@ TESTCASE (follow_misaligned_stack)
 {
   const guint32 code_template[] =
   {
-    0xa9bf7bf4, /* stp x20, lr, [sp, #-0x10]! */
-    0xd10023ff, /* sub sp, sp, #8             */
-    0x14000002, /* b part_two                 */
-    0xd4200540, /* brk #42                    */
+    GUINT32_TO_LE (0xa9bf7bf4), /* stp x20, lr, [sp, #-0x10]! */
+    GUINT32_TO_LE (0xd10023ff), /* sub sp, sp, #8             */
+    GUINT32_TO_LE (0x14000002), /* b part_two                 */
+    GUINT32_TO_LE (0xd4200540), /* brk #42                    */
     /* part_two:                              */
-    0x94000009, /* bl get_base_value          */
-    0x10000070, /* adr x16, part_three        */
-    0xd61f0200, /* br x16                     */
-    0xd4200560, /* brk #43                    */
+    GUINT32_TO_LE (0x94000009), /* bl get_base_value          */
+    GUINT32_TO_LE (0x10000070), /* adr x16, part_three        */
+    GUINT32_TO_LE (0xd61f0200), /* br x16                     */
+    GUINT32_TO_LE (0xd4200560), /* brk #43                    */
     /* part_three:                            */
-    0x100000f0, /* adr x16, add_other_value   */
-    0xd63f0200, /* blr x16                    */
-    0x910023ff, /* add sp, sp, #8             */
-    0xa8c17bf4, /* ldp x20, lr, [sp], #0x10   */
-    0xd65f03c0, /* ret                        */
+    GUINT32_TO_LE (0x100000f0), /* adr x16, add_other_value   */
+    GUINT32_TO_LE (0xd63f0200), /* blr x16                    */
+    GUINT32_TO_LE (0x910023ff), /* add sp, sp, #8             */
+    GUINT32_TO_LE (0xa8c17bf4), /* ldp x20, lr, [sp], #0x10   */
+    GUINT32_TO_LE (0xd65f03c0), /* ret                        */
     /* get_base_value:                        */
-    0xd2800500, /* mov x0, #40                */
-    0xd65f03c0, /* ret                        */
+    GUINT32_TO_LE (0xd2800500), /* mov x0, #40                */
+    GUINT32_TO_LE (0xd65f03c0), /* ret                        */
     /* add_other_value:                       */
-    0x91000800, /* add x0, x0, #2             */
-    0xd65f03c0, /* ret                        */
+    GUINT32_TO_LE (0x91000800), /* add x0, x0, #2             */
+    GUINT32_TO_LE (0xd65f03c0), /* ret                        */
   };
   printf("follow_misaligned_stack =======\n");
   StalkerTestFunc func;
@@ -1778,25 +1916,25 @@ TESTCASE (exclusive_load_store_should_not_be_disturbed)
 {
   guint32 code_template[] =
   {
-    0x58000200, /* ldr x0, [pointer_to_value] */
+    GUINT32_TO_LE (0x58000200), /* ldr x0, [pointer_to_value] */
     /* retry:                                 */
-    0xc85f7c01, /* ldxr x1, [x0]              */
-    0xf100043f, /* cmp x1, #1                 */
-    0x54000160, /* b.eq nope                  */
-    0xf100083f, /* cmp x1, #2                 */
-    0x54000120, /* b.eq nope                  */
-    0xf1000c3f, /* cmp x1, #3                 */
-    0x540000e0, /* b.eq nope                  */
-    0xf100103f, /* cmp x1, #4                 */
-    0x540000a0, /* b.eq nope                  */
-    0x91000421, /* add x1, x1, #1             */
-    0xc8027c01, /* stxr w2, x1, [x0]          */
-    0x35fffea2, /* cbnz w2, retry             */
-    0xd65f03c0, /* ret                        */
-    /* nope:                                  */
-    0xd5033f5f, /* clrex                      */
-    0xd65f03c0, /* ret                        */
-    /* pointer_to_value:                      */
+    GUINT32_TO_LE (0xc85f7c01), /* ldxr x1, [x0]              */
+    GUINT32_TO_LE (0xf100043f), /* cmp x1, #1                 */
+    GUINT32_TO_LE (0x54000160), /* b.eq nope                  */
+    GUINT32_TO_LE (0xf100083f), /* cmp x1, #2                 */
+    GUINT32_TO_LE (0x54000120), /* b.eq nope                  */
+    GUINT32_TO_LE (0xf1000c3f), /* cmp x1, #3                 */
+    GUINT32_TO_LE (0x540000e0), /* b.eq nope                  */
+    GUINT32_TO_LE (0xf100103f), /* cmp x1, #4                 */
+    GUINT32_TO_LE (0x540000a0), /* b.eq nope                  */
+    GUINT32_TO_LE (0x91000421), /* add x1, x1, #1             */
+    GUINT32_TO_LE (0xc8027c01), /* stxr w2, x1, [x0]          */
+    GUINT32_TO_LE (0x35fffea2), /* cbnz w2, retry             */
+    GUINT32_TO_LE (0xd65f03c0), /* ret                        */
+    /* nope:                                                  */
+    GUINT32_TO_LE (0xd5033f5f), /* clrex                      */
+    GUINT32_TO_LE (0xd65f03c0), /* ret                        */
+    /* pointer_to_value:                                      */
     0x44332211, 0x88776655,
   };
   StalkerTestFunc func;
@@ -1871,8 +2009,10 @@ do_patch_instruction (gpointer mem,
   guint32 * insn = mem;
   guint32 new_insn = GPOINTER_TO_SIZE (user_data);
 
-  *insn = new_insn;
+  *insn = GUINT32_TO_LE (new_insn);
 }
+
+#ifndef HAVE_WINDOWS
 
 TESTCASE (pthread_create)
 {
@@ -1903,6 +2043,8 @@ increment_integer (gpointer data)
   *number += 1;
   return NULL;
 }
+
+#endif
 
 TESTCASE (heap_api)
 {
@@ -1945,6 +2087,9 @@ TESTCASE (no_register_clobber)
 
   for (i = AArch64_REG_X0; i <= AArch64_REG_X28; i++)
   {
+    gboolean is_platform_register = i == ARM64_REG_X18;
+    if (is_platform_register)
+      continue;
     gum_arm64_writer_put_ldr_reg_u64 (&cw, i, i);
   }
   gum_arm64_writer_put_ldr_reg_u64 (&cw, AArch64_REG_FP, AArch64_REG_FP);
@@ -1986,6 +2131,9 @@ TESTCASE (no_register_clobber)
 
   for (i = AArch64_REG_X0; i <= AArch64_REG_X28; i++)
   {
+    gboolean is_platform_register = i == AArch64_REG_X18;
+    if (is_platform_register)
+      continue;
     g_assert_cmphex (ctx.x[i - AArch64_REG_X0], ==, i);
   }
   g_assert_cmphex (ctx.fp, ==, AArch64_REG_FP);
@@ -1997,20 +2145,14 @@ TESTCASE (no_register_clobber)
 
 TESTCASE (performance)
 {
-  GumMemoryRange runner_range;
   GTimer * timer;
   gdouble duration_direct, duration_stalked;
 
-  runner_range.base_address = 0;
-  runner_range.size = 0;
-  gum_process_enumerate_modules (store_range_of_test_runner, &runner_range);
-  g_assert_true (runner_range.base_address != 0 && runner_range.size != 0);
-
   timer = g_timer_new ();
-  pretend_workload (&runner_range);
+  pretend_workload (fixture->runner_range);
 
   g_timer_reset (timer);
-  pretend_workload (&runner_range);
+  pretend_workload (fixture->runner_range);
   duration_direct = g_timer_elapsed (timer, NULL);
 
   fixture->sink->mask = GUM_NOTHING;
@@ -2021,12 +2163,12 @@ TESTCASE (performance)
 
   /* warm-up */
   g_timer_reset (timer);
-  pretend_workload (&runner_range);
+  pretend_workload (fixture->runner_range);
   g_timer_elapsed (timer, NULL);
 
   /* the real deal */
   g_timer_reset (timer);
-  pretend_workload (&runner_range);
+  pretend_workload (fixture->runner_range);
   duration_stalked = g_timer_elapsed (timer, NULL);
 
   gum_stalker_unfollow_me (fixture->stalker);
@@ -2037,23 +2179,8 @@ TESTCASE (performance)
       duration_direct, duration_stalked, duration_stalked / duration_direct);
 }
 
-static gboolean
-store_range_of_test_runner (const GumModuleDetails * details,
-                            gpointer user_data)
-{
-  GumMemoryRange * runner_range = user_data;
-
-  if (strstr (details->name, "gum-tests") != NULL)
-  {
-    *runner_range = *details->range;
-    return FALSE;
-  }
-
-  return TRUE;
-}
-
 GUM_NOINLINE static void
-pretend_workload (GumMemoryRange * runner_range)
+pretend_workload (const GumMemoryRange * runner_range)
 {
   lzma_stream stream = LZMA_STREAM_INIT;
   const uint32_t preset = 9 | LZMA_PRESET_EXTREME;
@@ -2106,7 +2233,6 @@ pretend_workload (GumMemoryRange * runner_range)
 
 TESTCASE (prefetch)
 {
-  GumMemoryRange runner_range;
   gint trust;
   int compile_pipes[2] = { -1, -1 };
   int execute_pipes[2] = { -1, -1 };
@@ -2127,13 +2253,6 @@ TESTCASE (prefetch)
     g_print ("<skipping, run in slow mode> ");
     return;
   }
-
-  /* Initialize workload parameters */
-  runner_range.base_address = 0;
-  runner_range.size = 0;
-  gum_process_enumerate_modules (store_range_of_test_runner, &runner_range);
-  g_assert_cmpuint (runner_range.base_address, !=, 0);
-  g_assert_cmpuint (runner_range.size, !=, 0);
 
   /* Initialize Stalker */
   gum_stalker_set_trust_threshold (fixture->stalker, 3);
@@ -2167,7 +2286,7 @@ TESTCASE (prefetch)
   gum_stalker_deactivate (fixture->stalker);
 
   /* Run the child */
-  prefetch_run_child (fixture->stalker, &runner_range,
+  prefetch_run_child (fixture->stalker, fixture->runner_range,
       compile_pipes[STDOUT_FILENO], execute_pipes[STDOUT_FILENO]);
 
   /* Read the results */
@@ -2196,7 +2315,7 @@ TESTCASE (prefetch)
   }
 
   /* Run the child again */
-  prefetch_run_child (fixture->stalker, &runner_range,
+  prefetch_run_child (fixture->stalker, fixture->runner_range,
       compile_pipes[STDOUT_FILENO], execute_pipes[STDOUT_FILENO]);
 
   /* Read the results */
@@ -2264,7 +2383,7 @@ prefetch_on_event (const GumEvent * event,
 
 static void
 prefetch_run_child (GumStalker * stalker,
-                    GumMemoryRange * runner_range,
+                    const GumMemoryRange * runner_range,
                     int compile_fd,
                     int execute_fd)
 {
@@ -2392,3 +2511,144 @@ gum_test_stalker_observer_increment_total (GumStalkerObserver * observer)
 }
 
 #endif
+
+TESTCASE (run_on_thread_current)
+{
+  GumThreadId thread_id;
+  RunOnThreadCtx ctx;
+  gboolean accepted;
+
+  thread_id = gum_process_get_current_thread_id ();
+  ctx.caller_id = thread_id;
+  ctx.thread_id = G_MAXSIZE;
+
+  accepted = gum_stalker_run_on_thread (fixture->stalker, thread_id,
+      run_on_thread, &ctx, NULL);
+  g_assert_true (accepted);
+  g_assert_cmpuint (ctx.thread_id, ==, thread_id);
+}
+
+TESTCASE (run_on_thread_current_sync)
+{
+  GumThreadId thread_id;
+  RunOnThreadCtx ctx;
+  gboolean accepted;
+
+  thread_id = gum_process_get_current_thread_id ();
+  ctx.caller_id = thread_id;
+  ctx.thread_id = G_MAXSIZE;
+
+  accepted = gum_stalker_run_on_thread_sync (fixture->stalker, thread_id,
+      run_on_thread, &ctx);
+  g_assert_true (accepted);
+  g_assert_cmpuint (thread_id, ==, ctx.thread_id);
+}
+
+static void
+run_on_thread (const GumCpuContext * cpu_context,
+               gpointer user_data)
+{
+  RunOnThreadCtx * ctx = user_data;
+
+  g_usleep (250000);
+  ctx->thread_id = gum_process_get_current_thread_id ();
+
+  if (ctx->thread_id == ctx->caller_id)
+    g_assert_null (cpu_context);
+  else
+    g_assert_nonnull (cpu_context);
+}
+
+TESTCASE (run_on_thread_other)
+{
+  GThread * thread;
+  gboolean done = FALSE;
+  GumThreadId other_id, this_id;
+  RunOnThreadCtx ctx;
+  gboolean accepted;
+
+  thread = create_sleeping_dummy_thread_sync (&done, &other_id);
+
+  this_id = gum_process_get_current_thread_id ();
+  g_assert_cmphex (this_id, !=, other_id);
+  ctx.caller_id = this_id;
+  ctx.thread_id = G_MAXSIZE;
+
+  accepted = gum_stalker_run_on_thread (fixture->stalker, other_id,
+      run_on_thread, &ctx, NULL);
+  g_assert_true (accepted);
+  done = TRUE;
+  g_thread_join (thread);
+  g_assert_cmphex (ctx.thread_id, ==, other_id);
+}
+
+TESTCASE (run_on_thread_other_sync)
+{
+  GThread * thread;
+  gboolean done = FALSE;
+  GumThreadId other_id, this_id;
+  RunOnThreadCtx ctx;
+  gboolean accepted;
+
+  thread = create_sleeping_dummy_thread_sync (&done, &other_id);
+
+  this_id = gum_process_get_current_thread_id ();
+  g_assert_cmphex (this_id, !=, other_id);
+  ctx.caller_id = this_id;
+  ctx.thread_id = G_MAXSIZE;
+
+  accepted = gum_stalker_run_on_thread_sync (fixture->stalker, other_id,
+      run_on_thread, &ctx);
+  g_assert_true (accepted);
+  done = TRUE;
+  g_thread_join (thread);
+  g_assert_cmpuint (ctx.thread_id, ==, other_id);
+}
+
+static GThread *
+create_sleeping_dummy_thread_sync (gboolean * done,
+                                   GumThreadId * thread_id)
+{
+  GThread * thread;
+  TestThreadSyncData sync_data;
+
+  g_mutex_init (&sync_data.mutex);
+  g_cond_init (&sync_data.cond);
+  sync_data.started = FALSE;
+  sync_data.thread_id = 0;
+  sync_data.done = done;
+
+  g_mutex_lock (&sync_data.mutex);
+
+  thread = g_thread_new ("sleepy", sleeping_dummy, &sync_data);
+
+  while (!sync_data.started)
+    g_cond_wait (&sync_data.cond, &sync_data.mutex);
+
+  *thread_id = sync_data.thread_id;
+
+  g_mutex_unlock (&sync_data.mutex);
+
+  g_cond_clear (&sync_data.cond);
+  g_mutex_clear (&sync_data.mutex);
+
+  return thread;
+}
+
+static gpointer
+sleeping_dummy (gpointer data)
+{
+  TestThreadSyncData * sync_data = data;
+  gboolean * done = sync_data->done;
+
+  g_mutex_lock (&sync_data->mutex);
+  sync_data->started = TRUE;
+  sync_data->thread_id = gum_process_get_current_thread_id ();
+  g_cond_signal (&sync_data->cond);
+  g_mutex_unlock (&sync_data->mutex);
+
+  while (!(*done))
+    g_thread_yield ();
+
+  return NULL;
+}

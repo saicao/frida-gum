@@ -1,0 +1,8 @@
+[wrap-git]
+url = https://github.com/frida/v8.git
+revision = 990fdb00e1506126019493dd3bda4d416c81eaee
+depth = 1
+
+[provide]
+dependency_names = v8-10.0
+

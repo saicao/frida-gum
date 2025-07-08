@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020-2024 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2020-2025 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  *
  * Licence: wxWindows Library Licence, Version 3.1
  */
@@ -20,8 +20,9 @@
 #include "gumquickmemory.h"
 #include "gumquickmodule.h"
 #include "gumquickprocess.h"
+#include "gumquickprofiler.h"
+#include "gumquicksampler.h"
 #include "gumquickscript-priv.h"
-#include "gumquickscript-runtime.h"
 #include "gumquickscriptbackend-priv.h"
 #include "gumquickscriptbackend.h"
 #include "gumquicksocket.h"
@@ -62,12 +63,14 @@ struct _GumQuickScript
   GumQuickKernel kernel;
   GumQuickMemory memory;
   GumQuickModule module;
-  GumQuickProcess process;
   GumQuickThread thread;
+  GumQuickProcess process;
   GumQuickFile file;
   GumQuickChecksum checksum;
+#ifndef G_OS_NONE
   GumQuickStream stream;
   GumQuickSocket socket;
+#endif
 #ifdef HAVE_SQLITE
   GumQuickDatabase database;
 #endif
@@ -80,6 +83,8 @@ struct _GumQuickScript
   GumQuickCodeRelocator code_relocator;
   GumQuickStalker stalker;
   GumQuickCloak cloak;
+  GumQuickSampler sampler;
+  GumQuickProfiler profiler;
 
   GumScriptMessageHandler message_handler;
   gpointer message_handler_data;
@@ -157,8 +162,10 @@ struct _GumQuickWorker
   GumQuickThread thread;
   GumQuickFile file;
   GumQuickChecksum checksum;
+#ifndef G_OS_NONE
   GumQuickStream stream;
   GumQuickSocket socket;
+#endif
 #ifdef HAVE_SQLITE
   GumQuickDatabase database;
 #endif
@@ -206,11 +213,17 @@ static void gum_quick_script_load_sync (GumScript * script,
     GCancellable * cancellable);
 static void gum_quick_script_do_load (GumScriptTask * task,
     GumQuickScript * self, gpointer task_data, GCancellable * cancellable);
+static void gum_quick_script_execute_runtime (GumQuickScript * self,
+    GumScriptTask * task);
+static void gum_quick_script_on_runtime_loaded (JSValue error,
+    gpointer user_data);
 static void gum_quick_script_execute_entrypoints (GumQuickScript * self,
     GumScriptTask * task);
 static JSValue gum_quick_script_on_entrypoints_executed (JSContext * ctx,
     JSValueConst this_val, int argc, JSValueConst * argv, int magic,
     JSValue * func_data);
+static void gum_quick_script_schedule_load_task_completion (
+    GumQuickScript * self, GumScriptTask * task);
 static gboolean gum_quick_script_complete_load_task (GumScriptTask * task);
 static void gum_quick_script_unload (GumScript * script,
     GCancellable * cancellable, GAsyncReadyCallback callback,
@@ -251,6 +264,8 @@ static void gum_quick_emit_data_free (GumEmitData * d);
 static GumQuickWorker * gum_quick_worker_new (GumQuickScript * script,
     GumESAsset * asset, JSValue on_message);
 static void gum_quick_worker_run (GumQuickWorker * self);
+static void gum_quick_worker_on_runtime_loaded (JSValue error,
+    gpointer user_data);
 static void gum_quick_worker_flush (GumQuickWorker * self);
 static void gum_quick_worker_do_post (GumWorkerMessageDelivery * d);
 static void gum_quick_worker_emit (const gchar * message, GBytes * data,
@@ -464,12 +479,9 @@ gum_quick_script_create_context (GumQuickScript * self,
 
   global_obj = JS_GetGlobalObject (ctx);
 
-  JS_DefinePropertyValueStr (ctx, global_obj, "global",
-      JS_DupValue (ctx, global_obj), JS_PROP_C_W_E);
-
   _gum_quick_core_init (core, self, ctx, global_obj,
       gum_quick_script_backend_get_scope_mutex (self->backend),
-      program, gumjs_frida_source_map, &self->interceptor, &self->stalker,
+      program, &self->interceptor, &self->stalker,
       (GumQuickMessageEmitter) gum_quick_script_emit, self,
       gum_quick_script_backend_get_scheduler (self->backend));
 
@@ -478,12 +490,15 @@ gum_quick_script_create_context (GumQuickScript * self,
   _gum_quick_kernel_init (&self->kernel, global_obj, core);
   _gum_quick_memory_init (&self->memory, global_obj, core);
   _gum_quick_module_init (&self->module, global_obj, core);
-  _gum_quick_process_init (&self->process, global_obj, &self->module, core);
   _gum_quick_thread_init (&self->thread, global_obj, core);
+  _gum_quick_process_init (&self->process, global_obj, &self->module,
+      &self->thread, core);
   _gum_quick_file_init (&self->file, global_obj, core);
   _gum_quick_checksum_init (&self->checksum, global_obj, core);
+#ifndef G_OS_NONE
   _gum_quick_stream_init (&self->stream, global_obj, core);
   _gum_quick_socket_init (&self->socket, global_obj, &self->stream, core);
+#endif
 #ifdef HAVE_SQLITE
   _gum_quick_database_init (&self->database, global_obj, core);
 #endif
@@ -498,6 +513,9 @@ gum_quick_script_create_context (GumQuickScript * self,
   _gum_quick_stalker_init (&self->stalker, global_obj, &self->code_writer,
       &self->instruction, core);
   _gum_quick_cloak_init (&self->cloak, global_obj, core);
+  _gum_quick_sampler_init (&self->sampler, global_obj, core);
+  _gum_quick_profiler_init (&self->profiler, global_obj, &self->sampler,
+      &self->interceptor, core);
 
   JS_FreeValue (ctx, global_obj);
 
@@ -532,6 +550,8 @@ gum_quick_script_destroy_context (GumQuickScript * self)
 
     _gum_quick_scope_enter (&scope, core);
 
+    _gum_quick_profiler_dispose (&self->profiler);
+    _gum_quick_sampler_dispose (&self->sampler);
     _gum_quick_cloak_dispose (&self->cloak);
     _gum_quick_stalker_dispose (&self->stalker);
     _gum_quick_code_relocator_dispose (&self->code_relocator);
@@ -544,12 +564,14 @@ gum_quick_script_destroy_context (GumQuickScript * self)
 #ifdef HAVE_SQLITE
     _gum_quick_database_dispose (&self->database);
 #endif
+#ifndef G_OS_NONE
     _gum_quick_socket_dispose (&self->socket);
     _gum_quick_stream_dispose (&self->stream);
+#endif
     _gum_quick_checksum_dispose (&self->checksum);
     _gum_quick_file_dispose (&self->file);
-    _gum_quick_thread_dispose (&self->thread);
     _gum_quick_process_dispose (&self->process);
+    _gum_quick_thread_dispose (&self->thread);
     _gum_quick_module_dispose (&self->module);
     _gum_quick_memory_dispose (&self->memory);
     _gum_quick_kernel_dispose (&self->kernel);
@@ -575,6 +597,8 @@ gum_quick_script_destroy_context (GumQuickScript * self)
     core->current_scope = NULL;
   }
 
+  _gum_quick_profiler_finalize (&self->profiler);
+  _gum_quick_sampler_finalize (&self->sampler);
   _gum_quick_cloak_finalize (&self->cloak);
   _gum_quick_stalker_finalize (&self->stalker);
   _gum_quick_code_relocator_finalize (&self->code_relocator);
@@ -587,12 +611,14 @@ gum_quick_script_destroy_context (GumQuickScript * self)
 #ifdef HAVE_SQLITE
   _gum_quick_database_finalize (&self->database);
 #endif
+#ifndef G_OS_NONE
   _gum_quick_socket_finalize (&self->socket);
   _gum_quick_stream_finalize (&self->stream);
+#endif
   _gum_quick_checksum_finalize (&self->checksum);
   _gum_quick_file_finalize (&self->file);
-  _gum_quick_thread_finalize (&self->thread);
   _gum_quick_process_finalize (&self->process);
+  _gum_quick_thread_finalize (&self->thread);
   _gum_quick_module_finalize (&self->module);
   _gum_quick_memory_finalize (&self->memory);
   _gum_quick_kernel_finalize (&self->kernel);
@@ -648,7 +674,7 @@ gum_quick_script_do_load (GumScriptTask * task,
 
   self->state = GUM_SCRIPT_STATE_LOADING;
 
-  gum_quick_script_execute_entrypoints (self, task);
+  gum_quick_script_execute_runtime (self, task);
 
   return;
 
@@ -663,18 +689,51 @@ invalid_operation:
 }
 
 static void
-gum_quick_script_execute_entrypoints (GumQuickScript * self,
-                                      GumScriptTask * task)
+gum_quick_script_execute_runtime (GumQuickScript * self,
+                                  GumScriptTask * task)
 {
   GumQuickScope scope;
-  JSContext * ctx = self->ctx;
-  GArray * entrypoints;
-  guint i;
-  gboolean done;
 
   _gum_quick_scope_enter (&scope, &self->core);
 
-  gum_quick_bundle_load (gumjs_runtime_modules, ctx);
+  gum_es_program_load_runtime (self->program, self->ctx,
+      gum_quick_script_on_runtime_loaded, g_object_ref (task),
+      g_object_unref);
+
+  _gum_quick_scope_leave (&scope);
+}
+
+static void
+gum_quick_script_on_runtime_loaded (JSValue error,
+                                    gpointer user_data)
+{
+  GumScriptTask * task = user_data;
+  GumQuickScript * self;
+
+  self = GUM_QUICK_SCRIPT (
+      g_async_result_get_source_object (G_ASYNC_RESULT (task)));
+
+  if (JS_IsNull (error))
+  {
+    gum_quick_script_execute_entrypoints (self, task);
+  }
+  else
+  {
+    _gum_quick_core_on_unhandled_exception (&self->core, error);
+    gum_quick_script_schedule_load_task_completion (self, task);
+  }
+
+  g_object_unref (self);
+}
+
+static void
+gum_quick_script_execute_entrypoints (GumQuickScript * self,
+                                      GumScriptTask * task)
+{
+  GumQuickScope scope = GUM_QUICK_SCOPE_INIT (&self->core);
+  JSContext * ctx = self->ctx;
+  GArray * entrypoints;
+  guint i;
 
   entrypoints = self->program->entrypoints;
 
@@ -682,8 +741,8 @@ gum_quick_script_execute_entrypoints (GumQuickScript * self,
   {
     JSValue pending;
     guint num_results;
-    JSValue global_obj, promise_class, all_settled_func, loaded_promise;
-    JSValue then_func, task_obj, on_loaded_func, result_val;
+    JSValue global_obj, promise_class, all_settled, loaded_promise, then;
+    JSValue task_obj, on_loaded, val;
 
     pending = JS_NewArray (ctx);
     num_results = 0;
@@ -705,32 +764,29 @@ gum_quick_script_execute_entrypoints (GumQuickScript * self,
 
     global_obj = JS_GetGlobalObject (ctx);
     promise_class = JS_GetPropertyStr (ctx, global_obj, "Promise");
-    all_settled_func = JS_GetPropertyStr (ctx, promise_class, "allSettled");
+    all_settled = JS_GetPropertyStr (ctx, promise_class, "allSettled");
 
-    loaded_promise =
-        JS_Call (ctx, all_settled_func, promise_class, 1, &pending);
+    loaded_promise = JS_Call (ctx, all_settled, promise_class, 1, &pending);
 
-    then_func = JS_GetPropertyStr (ctx, loaded_promise, "then");
+    then = JS_GetPropertyStr (ctx, loaded_promise, "then");
 
     task_obj = JS_NewObject (ctx);
     JS_SetOpaque (task_obj, g_object_ref (task));
 
-    on_loaded_func = JS_NewCFunctionData (ctx,
+    on_loaded = JS_NewCFunctionData (ctx,
         gum_quick_script_on_entrypoints_executed, 1, 0, 1, &task_obj);
 
-    result_val = JS_Call (ctx, then_func, loaded_promise, 1, &on_loaded_func);
+    val = JS_Call (ctx, then, loaded_promise, 1, &on_loaded);
 
-    JS_FreeValue (ctx, result_val);
-    JS_FreeValue (ctx, on_loaded_func);
+    JS_FreeValue (ctx, val);
+    JS_FreeValue (ctx, on_loaded);
     JS_FreeValue (ctx, task_obj);
-    JS_FreeValue (ctx, then_func);
+    JS_FreeValue (ctx, then);
     JS_FreeValue (ctx, loaded_promise);
-    JS_FreeValue (ctx, all_settled_func);
+    JS_FreeValue (ctx, all_settled);
     JS_FreeValue (ctx, promise_class);
     JS_FreeValue (ctx, global_obj);
     JS_FreeValue (ctx, pending);
-
-    done = FALSE;
   }
   else
   {
@@ -745,19 +801,10 @@ gum_quick_script_execute_entrypoints (GumQuickScript * self,
       JS_FreeValue (ctx, result);
     }
 
-    done = TRUE;
+    gum_quick_script_schedule_load_task_completion (self, task);
   }
 
   g_array_set_size (entrypoints, 0);
-
-  _gum_quick_scope_leave (&scope);
-
-  if (done)
-  {
-    self->state = GUM_SCRIPT_STATE_LOADED;
-
-    gum_script_task_return_pointer (task, NULL, NULL);
-  }
 }
 
 static JSValue
@@ -774,13 +821,11 @@ gum_quick_script_on_entrypoints_executed (JSContext * ctx,
   GumQuickScript * self;
   GumQuickCore * core;
   guint n, i;
-  GSource * source;
 
   task = JS_GetAnyOpaque (func_data[0], &class_id);
   self = GUM_QUICK_SCRIPT (
       g_async_result_get_source_object (G_ASYNC_RESULT (task)));
-
-  core = JS_GetContextOpaque (ctx);
+  core = &self->core;
 
   _gum_quick_array_get_length (ctx, results, core, &n);
   for (i = 0; i != n; i++)
@@ -797,19 +842,30 @@ gum_quick_script_on_entrypoints_executed (JSContext * ctx,
     JS_FreeValue (ctx, result);
   }
 
+  gum_quick_script_schedule_load_task_completion (self, task);
+
+  g_object_unref (self);
+  g_object_unref (task);
+
+  return JS_UNDEFINED;
+}
+
+static void
+gum_quick_script_schedule_load_task_completion (GumQuickScript * self,
+                                                GumScriptTask * task)
+{
+  GumQuickCore * core = &self->core;
+  GSource * source;
+
   source = g_idle_source_new ();
   g_source_set_callback (source,
       (GSourceFunc) gum_quick_script_complete_load_task,
-      task, g_object_unref);
+      g_object_ref (task), g_object_unref);
   g_source_attach (source,
       gum_script_scheduler_get_js_context (core->scheduler));
   g_source_unref (source);
 
   _gum_quick_core_pin (core);
-
-  g_object_unref (self);
-
-  return JS_UNDEFINED;
 }
 
 static gboolean
@@ -921,8 +977,10 @@ gum_quick_script_try_unload (GumQuickScript * self)
 
   _gum_quick_stalker_flush (&self->stalker);
   _gum_quick_interceptor_flush (&self->interceptor);
+#ifndef G_OS_NONE
   _gum_quick_socket_flush (&self->socket);
   _gum_quick_stream_flush (&self->stream);
+#endif
   _gum_quick_process_flush (&self->process);
   success = _gum_quick_core_flush (&self->core,
       (GumQuickFlushNotify) gum_quick_script_try_unload,
@@ -1121,16 +1179,13 @@ _gum_quick_script_make_worker (GumQuickScript * self,
 
   global_obj = JS_GetGlobalObject (ctx);
 
-  JS_DefinePropertyValueStr (ctx, global_obj, "global",
-      JS_DupValue (ctx, global_obj), JS_PROP_C_W_E);
-
   core = &worker->core;
 
   {
     GumQuickScope scope = { core, NULL, };
 
     _gum_quick_core_init (core, self, ctx, global_obj, &worker->scope_mutex,
-        self->program, gumjs_frida_source_map, NULL, NULL,
+        self->program, NULL, NULL,
         (GumQuickMessageEmitter) gum_quick_worker_emit, worker,
         worker->scheduler);
 
@@ -1139,13 +1194,15 @@ _gum_quick_script_make_worker (GumQuickScript * self,
     _gum_quick_kernel_init (&worker->kernel, global_obj, core);
     _gum_quick_memory_init (&worker->memory, global_obj, core);
     _gum_quick_module_init (&worker->module, global_obj, core);
-    _gum_quick_process_init (&worker->process, global_obj, &worker->module,
-        core);
     _gum_quick_thread_init (&worker->thread, global_obj, core);
+    _gum_quick_process_init (&worker->process, global_obj, &worker->module,
+        &worker->thread, core);
     _gum_quick_file_init (&worker->file, global_obj, core);
     _gum_quick_checksum_init (&worker->checksum, global_obj, core);
+#ifndef G_OS_NONE
     _gum_quick_stream_init (&worker->stream, global_obj, core);
     _gum_quick_socket_init (&worker->socket, global_obj, &worker->stream, core);
+#endif
 #ifdef HAVE_SQLITE
     _gum_quick_database_init (&worker->database, global_obj, core);
 #endif
@@ -1265,8 +1322,10 @@ _gum_quick_worker_unref (GumQuickWorker * worker)
 #ifdef HAVE_SQLITE
     _gum_quick_database_dispose (&worker->database);
 #endif
+#ifndef G_OS_NONE
     _gum_quick_socket_dispose (&worker->socket);
     _gum_quick_stream_dispose (&worker->stream);
+#endif
     _gum_quick_checksum_dispose (&worker->checksum);
     _gum_quick_file_dispose (&worker->file);
     _gum_quick_thread_dispose (&worker->thread);
@@ -1301,8 +1360,10 @@ _gum_quick_worker_unref (GumQuickWorker * worker)
 #ifdef HAVE_SQLITE
     _gum_quick_database_finalize (&worker->database);
 #endif
+#ifndef G_OS_NONE
     _gum_quick_socket_finalize (&worker->socket);
     _gum_quick_stream_finalize (&worker->stream);
+#endif
     _gum_quick_checksum_finalize (&worker->checksum);
     _gum_quick_file_finalize (&worker->file);
     _gum_quick_thread_finalize (&worker->thread);
@@ -1328,13 +1389,31 @@ _gum_quick_worker_unref (GumQuickWorker * worker)
 static void
 gum_quick_worker_run (GumQuickWorker * self)
 {
-  JSContext * ctx = self->ctx;
   GumQuickScope scope;
-  JSValue val;
 
   _gum_quick_scope_enter (&scope, &self->core);
 
-  gum_quick_bundle_load (gumjs_runtime_modules, ctx);
+  gum_es_program_load_runtime (self->script->program, self->ctx,
+      gum_quick_worker_on_runtime_loaded, _gum_quick_worker_ref (self),
+      (GDestroyNotify) _gum_quick_worker_unref);
+
+  _gum_quick_scope_leave (&scope);
+}
+
+static void
+gum_quick_worker_on_runtime_loaded (JSValue error,
+                                    gpointer user_data)
+{
+  GumQuickWorker * self = user_data;
+  GumQuickScope scope = GUM_QUICK_SCOPE_INIT (&self->core);
+  JSContext * ctx = self->ctx;
+  JSValue val;
+
+  if (!JS_IsNull (error))
+  {
+    _gum_quick_core_on_unhandled_exception (&self->core, error);
+    return;
+  }
 
   val = JS_EvalFunction (ctx, self->entrypoint);
   if (!JS_IsException (val))
@@ -1370,8 +1449,6 @@ gum_quick_worker_run (GumQuickWorker * self)
     JS_FreeValue (ctx, val);
     g_free (init_code);
   }
-
-  _gum_quick_scope_leave (&scope);
 }
 
 void
@@ -1402,8 +1479,10 @@ gum_quick_worker_flush (GumQuickWorker * self)
 
   _gum_quick_scope_enter (&scope, &self->core);
 
+#ifndef G_OS_NONE
   _gum_quick_socket_flush (&self->socket);
   _gum_quick_stream_flush (&self->stream);
+#endif
   _gum_quick_process_flush (&self->process);
   success = _gum_quick_core_flush (&self->core,
       (GumQuickFlushNotify) gum_quick_worker_flush,

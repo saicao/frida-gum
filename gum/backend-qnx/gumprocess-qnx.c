@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015-2024 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2015-2025 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  * Copyright (C) 2023 Francesco Tamagni <mrmacete@protonmail.ch>
  *
  * Licence: wxWindows Library Licence, Version 3.1
@@ -7,63 +7,26 @@
 
 #include "gumprocess-priv.h"
 
-#include "backend-elf/gumprocess-elf.h"
 #include "gum-init.h"
-#include "gumqnx.h"
+#include "gum/gumqnx.h"
 #include "gumqnx-priv.h"
 
 #include <devctl.h>
 #include <dlfcn.h>
 #include <fcntl.h>
-#include <sys/link.h>
+#include <sys/elf.h>
 #include <sys/neutrino.h>
 #include <sys/procfs.h>
 #include <ucontext.h>
 
-#define GUM_QNX_MODULE_FLAG_EXECUTABLE 0x00000200
-
 #define GUM_PSR_THUMB 0x20
 
-typedef struct _GumQnxListHead GumQnxListHead;
-typedef struct _GumQnxModuleList GumQnxModuleList;
-typedef struct _GumQnxModule GumQnxModule;
-
-struct _GumQnxListHead
-{
-  GumQnxListHead * next;
-  GumQnxListHead * prev;
-};
-
-struct _GumQnxModuleList
-{
-  GumQnxListHead list;
-  GumQnxModule * module;
-  GumQnxListHead * root;
-  guint flags;
-};
-
-struct _GumQnxModule
-{
-  Link_map map;
-  gint ref_count;
-  guint flags;
-  const gchar * name;
-  /* ... */
-};
-
-static gchar * gum_try_init_libc_name (void);
-static void gum_deinit_libc_name (void);
+static void gum_deinit_libc_module (void);
 
 static void gum_store_cpu_context (GumThreadId thread_id,
     GumCpuContext * cpu_context, gpointer user_data);
 static void gum_enumerate_ranges_of (const gchar * device_path,
     GumPageProtection prot, GumFoundRangeFunc func, gpointer user_data);
-
-static gboolean gum_maybe_resolve_program_module (const gchar * name,
-    gchar ** path, GumAddress * base);
-static gboolean gum_module_path_equals (const gchar * path,
-    const gchar * name_or_path);
-static gchar * gum_resolve_path (const gchar * path);
 
 static void gum_cpu_context_from_qnx (const debug_greg_t * gregs,
     GumCpuContext * ctx);
@@ -72,38 +35,36 @@ static void gum_cpu_context_to_qnx (const GumCpuContext * ctx,
 
 static GumThreadState gum_thread_state_from_system_thread_state (int state);
 
-static gchar * gum_libc_name;
+static GumModule * gum_libc_module;
 
-const gchar *
-gum_process_query_libc_name (void)
+GumModule *
+gum_process_get_libc_module (void)
 {
-  static GOnce once = G_ONCE_INIT;
+  static gsize modules_value = 0;
 
-  g_once (&once, (GThreadFunc) gum_try_init_libc_name, NULL);
+  if (g_once_init_enter (&modules_value))
+  {
+    const gchar * symbol_in_libc = "exit";
+    gpointer addr_in_libc;
 
-  if (once.retval == NULL)
-    gum_panic ("Unable to locate the libc; please file a bug");
+    addr_in_libc = dlsym (RTLD_NEXT, symbol_in_libc);
+    g_assert (addr_in_libc != NULL);
 
-  return once.retval;
-}
+    gum_libc_module =
+        gum_process_find_module_by_address (GUM_ADDRESS (addr_in_libc));
 
-static gchar *
-gum_try_init_libc_name (void)
-{
-  const gpointer exit_impl = dlsym (RTLD_NEXT, "exit");
+    _gum_register_destructor (gum_deinit_libc_module);
 
-  if (!gum_process_resolve_module_pointer (exit_impl, &gum_libc_name, NULL))
-    return NULL;
+    g_once_init_leave (&modules_value, GPOINTER_TO_SIZE (gum_libc_module));
+  }
 
-  _gum_register_destructor (gum_deinit_libc_name);
-
-  return gum_libc_name;
+  return GSIZE_TO_POINTER (modules_value);
 }
 
 static void
-gum_deinit_libc_name (void)
+gum_deinit_libc_module (void)
 {
-  g_free (gum_libc_name);
+  g_object_unref (gum_libc_module);
 }
 
 gboolean
@@ -220,12 +181,13 @@ beach:
 
 void
 _gum_process_enumerate_threads (GumFoundThreadFunc func,
-                                gpointer user_data)
+                                gpointer user_data,
+                                GumThreadFlags flags)
 {
   gint fd, res G_GNUC_UNUSED;
   debug_process_t info;
   debug_thread_t thread;
-  gboolean carry_on = TRUE;
+  gboolean carry_on;
 
   fd = open ("/proc/self/as", O_RDONLY);
   g_assert (fd != -1);
@@ -233,35 +195,44 @@ _gum_process_enumerate_threads (GumFoundThreadFunc func,
   res = devctl (fd, DCMD_PROC_INFO, &info, sizeof (info), NULL);
   g_assert (res == 0);
 
-  thread.tid = 1;
-  while (carry_on &&
-      (devctl (fd, DCMD_PROC_TIDSTATUS, &thread, sizeof (thread), NULL) == 0))
+  for (thread.tid = 1, carry_on = TRUE;
+      carry_on && devctl (fd, DCMD_PROC_TIDSTATUS, &thread, sizeof (thread),
+        NULL) == 0;
+      thread.tid++)
   {
-    GumThreadDetails details;
+    GumThreadDetails details = { 0, };
     gchar thread_name[_NTO_THREAD_NAME_MAX];
+
+    if (thread.state == STATE_DEAD)
+      continue;
 
     details.id = thread.tid;
 
-    if (pthread_getname_np (thread.tid, thread_name,
-          sizeof (thread_name)) == 0 && thread_name[0] != '\0')
+    if ((flags & GUM_THREAD_FLAGS_NAME) != 0)
     {
-      details.name = thread_name;
-    }
-    else
-    {
-      details.name = NULL;
-    }
-
-    details.state = gum_thread_state_from_system_thread_state (thread.state);
-
-    if (thread.state != STATE_DEAD &&
-        gum_process_modify_thread (details.id, gum_store_cpu_context,
-          &details.cpu_context, GUM_MODIFY_THREAD_FLAGS_ABORT_SAFELY))
-    {
-      carry_on = func (&details, user_data);
+      if (pthread_getname_np (thread.tid, thread_name,
+            sizeof (thread_name)) == 0 && thread_name[0] != '\0')
+      {
+        details.name = thread_name;
+        details.flags |= GUM_THREAD_FLAGS_NAME;
+      }
     }
 
-    thread.tid++;
+    if ((flags & GUM_THREAD_FLAGS_STATE) != 0)
+    {
+      details.state = gum_thread_state_from_system_thread_state (thread.state);
+      details.flags |= GUM_THREAD_FLAGS_STATE;
+    }
+
+    if ((flags & GUM_THREAD_FLAGS_CPU_CONTEXT) != 0)
+    {
+      if (!gum_process_modify_thread (details.id, gum_store_cpu_context,
+            &details.cpu_context, GUM_MODIFY_THREAD_FLAGS_ABORT_SAFELY))
+        continue;
+      details.flags |= GUM_THREAD_FLAGS_CPU_CONTEXT;
+    }
+
+    carry_on = func (&details, user_data);
   }
 
   close (fd);
@@ -276,75 +247,14 @@ gum_store_cpu_context (GumThreadId thread_id,
 }
 
 gboolean
-_gum_process_collect_main_module (const GumModuleDetails * details,
+_gum_process_collect_main_module (GumModule * module,
                                   gpointer user_data)
 {
-  GumModuleDetails ** out = user_data;
+  GumModule ** out = user_data;
 
-  *out = gum_module_details_copy (details);
+  *out = g_object_ref (module);
 
   return FALSE;
-}
-
-void
-_gum_process_enumerate_modules (GumFoundModuleFunc func,
-                                gpointer user_data)
-{
-  GumQnxListHead * handle;
-  GumQnxListHead * cur;
-  gboolean carry_on = TRUE;
-
-  handle = dlopen (NULL, RTLD_NOW);
-
-  for (cur = handle->next; carry_on && cur != handle; cur = cur->next)
-  {
-    const GumQnxModuleList * l = (GumQnxModuleList *) cur;
-    const GumQnxModule * mod = l->module;
-    const Link_map * map = &mod->map;
-    gchar * resolved_path, * resolved_name;
-    GumModuleDetails details;
-    GumMemoryRange range;
-    const Elf32_Ehdr * ehdr;
-    const Elf32_Phdr * phdr;
-    guint i;
-
-    if ((mod->flags & GUM_QNX_MODULE_FLAG_EXECUTABLE) != 0)
-    {
-      resolved_path = gum_qnx_query_program_path_for_self (NULL);
-      g_assert (resolved_path != NULL);
-      resolved_name = g_path_get_basename (resolved_path);
-
-      details.name = resolved_name;
-      details.path = resolved_path;
-    }
-    else
-    {
-      resolved_path = gum_resolve_path (map->l_path);
-      resolved_name = NULL;
-
-      details.name = map->l_name;
-      details.path = resolved_path;
-    }
-
-    details.range = &range;
-    range.base_address = map->l_addr;
-    range.size = 0;
-    ehdr = GSIZE_TO_POINTER (map->l_addr);
-    phdr = (gconstpointer) ehdr + ehdr->e_ehsize;
-    for (i = 0; i != ehdr->e_phnum; i++)
-    {
-      const Elf32_Phdr * h = &phdr[i];
-      if (h->p_type == PT_LOAD)
-        range.size += h->p_memsz;
-    }
-
-    carry_on = func (&details, user_data);
-
-    g_free (resolved_name);
-    g_free (resolved_path);
-  }
-
-  dlclose (handle);
 }
 
 void
@@ -509,76 +419,47 @@ failure:
 }
 
 gboolean
-gum_module_load (const gchar * module_name,
-                 GError ** error)
+gum_thread_set_hardware_breakpoint (GumThreadId thread_id,
+                                    guint breakpoint_id,
+                                    GumAddress address,
+                                    GError ** error)
 {
-  if (dlopen (module_name, RTLD_LAZY) == NULL)
-    goto not_found;
-
-  return TRUE;
-
-not_found:
-  {
-    g_set_error (error, GUM_ERROR, GUM_ERROR_NOT_FOUND, "%s", dlerror ());
-    return FALSE;
-  }
+  g_set_error (error, GUM_ERROR, GUM_ERROR_NOT_SUPPORTED,
+      "Hardware breakpoints are not yet supported on this platform");
+  return FALSE;
 }
 
 gboolean
-gum_module_ensure_initialized (const gchar * module_name)
+gum_thread_unset_hardware_breakpoint (GumThreadId thread_id,
+                                      guint breakpoint_id,
+                                      GError ** error)
 {
-  gboolean success;
-  gchar * name = NULL;
-  void * module;
-
-  success = FALSE;
-
-  if (!_gum_process_resolve_module_name (module_name, &name, NULL))
-    goto beach;
-
-  module = dlopen (name, RTLD_LAZY);
-  if (module == NULL)
-    goto beach;
-  dlclose (module);
-
-  success = TRUE;
-
-beach:
-  g_free (name);
-
-  return success;
+  g_set_error (error, GUM_ERROR, GUM_ERROR_NOT_SUPPORTED,
+      "Hardware breakpoints are not yet supported on this platform");
+  return FALSE;
 }
 
-GumAddress
-gum_module_find_export_by_name (const gchar * module_name,
-                                const gchar * symbol_name)
+gboolean
+gum_thread_set_hardware_watchpoint (GumThreadId thread_id,
+                                    guint watchpoint_id,
+                                    GumAddress address,
+                                    gsize size,
+                                    GumWatchConditions wc,
+                                    GError ** error)
 {
-  GumAddress result;
-  void * module;
+  g_set_error (error, GUM_ERROR, GUM_ERROR_NOT_SUPPORTED,
+      "Hardware watchpoints are not yet supported on this platform");
+  return FALSE;
+}
 
-  if (module_name != NULL)
-  {
-    gchar * name;
-
-    if (!_gum_process_resolve_module_name (module_name, &name, NULL))
-      return 0;
-    module = dlopen (name, RTLD_LAZY);
-    g_free (name);
-
-    if (module == NULL)
-      return 0;
-  }
-  else
-  {
-    module = RTLD_DEFAULT;
-  }
-
-  result = GUM_ADDRESS (dlsym (module, symbol_name));
-
-  if (module != RTLD_DEFAULT)
-    dlclose (module);
-
-  return result;
+gboolean
+gum_thread_unset_hardware_watchpoint (GumThreadId thread_id,
+                                      guint watchpoint_id,
+                                      GError ** error)
+{
+  g_set_error (error, GUM_ERROR, GUM_ERROR_NOT_SUPPORTED,
+      "Hardware watchpoints are not yet supported on this platform");
+  return FALSE;
 }
 
 GumCpuType
@@ -748,106 +629,6 @@ beach:
 
     return program_path;
   }
-}
-
-gboolean
-_gum_process_resolve_module_name (const gchar * name,
-                                  gchar ** path,
-                                  GumAddress * base)
-{
-  GumQnxListHead * handle;
-  const GumQnxModule * module;
-
-  handle = dlopen (name, RTLD_LAZY | RTLD_NOLOAD);
-  if (handle == NULL)
-    return gum_maybe_resolve_program_module (name, path, base);
-
-  module = ((GumQnxModuleList *) handle->next->next)->module;
-
-  if (path != NULL)
-    *path = gum_resolve_path (module->map.l_path);
-
-  if (base != NULL)
-    *base = module->map.l_addr;
-
-  dlclose (handle);
-
-  return TRUE;
-}
-
-static gboolean
-gum_maybe_resolve_program_module (const gchar * name,
-                                  gchar ** path,
-                                  GumAddress * base)
-{
-  gchar * program_path;
-
-  program_path = gum_qnx_query_program_path_for_self (NULL);
-  g_assert (program_path != NULL);
-
-  if (!gum_module_path_equals (program_path, name))
-    goto not_the_program;
-
-  if (path != NULL)
-    *path = g_steal_pointer (&program_path);
-
-  if (base != NULL)
-  {
-    GumQnxListHead * handle;
-    const GumQnxModule * program;
-
-    handle = dlopen (NULL, RTLD_NOW);
-
-    program = ((GumQnxModuleList *) handle->next)->module;
-    *base = program->map.l_addr;
-
-    dlclose (handle);
-  }
-
-  g_free (program_path);
-
-  return TRUE;
-
-not_the_program:
-  {
-    g_free (program_path);
-
-    return FALSE;
-  }
-}
-
-static gboolean
-gum_module_path_equals (const gchar * path,
-                        const gchar * name_or_path)
-{
-  gchar * s;
-
-  if (name_or_path[0] == '/')
-    return strcmp (name_or_path, path) == 0;
-
-  if ((s = strrchr (path, '/')) != NULL)
-    return strcmp (name_or_path, s + 1) == 0;
-
-  return strcmp (name_or_path, path) == 0;
-}
-
-static gchar *
-gum_resolve_path (const gchar * path)
-{
-  gchar * target, * parent_dir, * canonical_path;
-
-  target = g_file_read_link (path, NULL);
-  if (target == NULL)
-    return g_strdup (path);
-
-  parent_dir = g_path_get_dirname (path);
-
-  canonical_path = g_canonicalize_filename (target, parent_dir);
-
-  g_free (parent_dir);
-  g_free (target);
-
-  return canonical_path;
 }
 
 static void

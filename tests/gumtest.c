@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2008-2023 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2008-2025 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  *
  * Licence: wxWindows Library Licence, Version 3.1
  */
@@ -181,6 +181,8 @@ main (gint argc, gchar * argv[])
   TESTLIST_REGISTER (cloak);
   TESTLIST_REGISTER (memory);
   TESTLIST_REGISTER (process);
+  TESTLIST_REGISTER (thread_registry);
+  TESTLIST_REGISTER (module_registry);
 #if !defined (HAVE_QNX) && !(defined (HAVE_ANDROID) && defined (HAVE_ARM64))
   TESTLIST_REGISTER (symbolutil);
 #endif
@@ -209,7 +211,9 @@ main (gint argc, gchar * argv[])
 #ifdef HAVE_ARM64
   TESTLIST_REGISTER (interceptor_arm64);
 #endif
+#if !(defined (HAVE_FREEBSD) && defined (HAVE_ARM64))
   TESTLIST_REGISTER (memoryaccessmonitor);
+#endif
 
   if (gum_stalker_is_supported ())
   {
@@ -265,8 +269,6 @@ main (gint argc, gchar * argv[])
   /* Prof */
 #if !defined (HAVE_IOS) && !(defined (HAVE_ANDROID) && defined (HAVE_ARM64))
   TESTLIST_REGISTER (sampler);
-#endif
-#ifdef HAVE_WINDOWS
   TESTLIST_REGISTER (profiler);
 #endif
 

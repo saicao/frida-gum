@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 from __future__ import unicode_literals, print_function
 import codecs
 import os
@@ -7,7 +5,11 @@ import re
 import sys
 
 
-def generate_and_write_bindings(source_dir, output_dir):
+def main(argv):
+    output_dir, source_dir = argv[1:]
+    generate_and_write_bindings(output_dir, source_dir)
+
+def generate_and_write_bindings(output_dir, source_dir):
     binding_params = [
         ("writer", { 'ignore': ['new', 'ref', 'unref', 'init', 'clear', 'reset',
                                 'set_target_cpu', 'set_target_abi', 'set_target_os',
@@ -526,7 +528,7 @@ G_GNUC_INTERNAL gboolean _gum_quick_{flavor}_{name}_get (JSContext * ctx, JSValu
 
 G_GNUC_INTERNAL void _gum_quick_{flavor}_{name}_init ({wrapper_struct_name} * self, JSContext * ctx, {module_struct_name} * parent);
 G_GNUC_INTERNAL void _gum_quick_{flavor}_{name}_finalize ({wrapper_struct_name} * self);
-G_GNUC_INTERNAL void _gum_quick_{flavor}_{name}_gc_mark ({wrapper_struct_name} * self);
+G_GNUC_INTERNAL void _gum_quick_{flavor}_{name}_gc_mark (JSRuntime * rt, JSValueConst val, JS_MarkFunc * mark_func);
 G_GNUC_INTERNAL void _gum_quick_{flavor}_{name}_reset ({wrapper_struct_name} * self, {impl_struct_name} * impl);
 """
     return template.format(**params)
@@ -2347,8 +2349,11 @@ def generate_enum_parser(name, type, prefix, values):
     statements = []
     for i, value in enumerate(values):
         statements.extend([
-            "{0}if (strcmp (name, \"{1}\") == 0)".format("  else " if i > 0 else "", value),
-            "    *value = {0}{1};".format(prefix, value.upper().replace("-", "_")),
+            f"  if (strcmp (name, \"{value}\") == 0)",
+            "  {",
+            "    *value = {}{};".format(prefix, value.upper().replace("-", "_")),
+            "    return TRUE;",
+            "  }",
         ])
 
     code = """\
@@ -2357,10 +2362,9 @@ gum_try_parse_{name} (
     const gchar * name,
     {type} * value)
 {{
-  {statements}
-  else
-    return FALSE;
-  return TRUE;
+{statements}
+
+  return FALSE;
 }}
 """.format(
         name=name,
@@ -3220,7 +3224,4 @@ def to_camel_case(name, start_high):
 
 
 if __name__ == '__main__':
-    source_dir = sys.argv[1]
-    output_dir = sys.argv[2]
-
-    generate_and_write_bindings(source_dir, output_dir)
+    main(sys.argv)

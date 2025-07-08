@@ -72,7 +72,19 @@ namespace Gum {
 		ABORT_SAFELY,
 	}
 
+	public enum ThreadFlags {
+		NAME,
+		STATE,
+		CPU_CONTEXT,
+		ENTRYPOINT_ROUTINE,
+		ENTRYPOINT_PARAMETER,
+
+		NONE,
+		ALL,
+	}
+
 	public enum OS {
+		NONE,
 		WINDOWS,
 		MACOS,
 		LINUX,
@@ -89,6 +101,8 @@ namespace Gum {
 		CAPI,
 		SYSAPI
 	}
+
+	public const CpuType NATIVE_CPU;
 
 	[CCode (cprefix = "GUM_CPU_")]
 	public enum CpuType {
@@ -136,7 +150,8 @@ namespace Gum {
 	public class Interceptor : GLib.Object {
 		public static Interceptor obtain ();
 
-		public Gum.AttachReturn attach (void * function_address, Gum.InvocationListener listener, void * listener_function_data = null);
+		public Gum.AttachReturn attach (void * function_address, Gum.InvocationListener listener,
+			void * listener_function_data = null, Gum.AttachFlags flags = NONE);
 		public void detach (Gum.InvocationListener listener);
 
 		public Gum.ReplaceReturn replace (void * function_address, void * replacement_function, void * replacement_data = null,
@@ -154,6 +169,11 @@ namespace Gum {
 
 		public void ignore_other_threads ();
 		public void unignore_other_threads ();
+
+		public void with_lock_held (Gum.Interceptor.LockedFunc func);
+		public bool is_locked ();
+
+		public delegate void LockedFunc ();
 	}
 
 	[CCode (type_cname = "GumInvocationListenerInterface")]
@@ -284,13 +304,16 @@ namespace Gum {
 		public void set_teardown_requirement (Gum.TeardownRequirement requirement);
 		public Gum.CodeSigningPolicy get_code_signing_policy ();
 		public void set_code_signing_policy (Gum.CodeSigningPolicy policy);
-		public unowned string query_libc_name ();
 		public bool is_debugger_attached ();
 		public Gum.ProcessId get_id ();
 		public Gum.ThreadId get_current_thread_id ();
 		public bool has_thread (Gum.ThreadId thread_id);
 		public bool modify_thread (Gum.ThreadId thread_id, Gum.ModifyThreadFunc func, Gum.ModifyThreadFlags flags = NONE);
-		public void enumerate_threads (Gum.FoundThreadFunc func);
+		public void enumerate_threads (Gum.FoundThreadFunc func, Gum.ThreadFlags flags = ALL);
+		public unowned Module get_main_module ();
+		public unowned Module? get_libc_module ();
+		public Module? find_module_by_name (string name);
+		public Module? find_module_by_address (Gum.Address address);
 		public void enumerate_modules (Gum.FoundModuleFunc func);
 		public void enumerate_ranges (Gum.PageProtection prot, Gum.FoundRangeFunc func);
 		public Gum.HeapApiList find_heap_apis ();
@@ -325,22 +348,29 @@ namespace Gum {
 		public bool resume (Gum.ThreadId thread_id) throws Gum.Error;
 	}
 
-	namespace Module {
-		public bool ensure_initialized (string module_name);
-		public void enumerate_imports (string module_name, Gum.FoundImportFunc func);
-		public void enumerate_exports (string module_name, Gum.FoundExportFunc func);
-		public void enumerate_symbols (string module_name, Gum.FoundSymbolFunc func);
-		public void enumerate_ranges (string module_name, Gum.PageProtection prot, Gum.FoundRangeFunc func);
-		public void enumerate_sections (string module_name, Gum.FoundSectionFunc func);
-		public void enumerate_dependencies (string module_name, Gum.FoundDependencyFunc func);
-		public void * find_base_address (string module_name);
-		public void * find_export_by_name (string? module_name, string symbol_name);
+	public interface Module : GLib.Object {
+		public string name { get; }
+		public string path { get; }
+		public Gum.MemoryRange? range { get; }
+
+		public static Module load (string module_name) throws Gum.Error;
+
+		public abstract void ensure_initialized ();
+		public abstract void enumerate_imports (Gum.FoundImportFunc func);
+		public abstract void enumerate_exports (Gum.FoundExportFunc func);
+		public abstract void enumerate_symbols (Gum.FoundSymbolFunc func);
+		public abstract void enumerate_ranges (Gum.PageProtection prot, Gum.FoundRangeFunc func);
+		public abstract void enumerate_sections (Gum.FoundSectionFunc func);
+		public abstract void enumerate_dependencies (Gum.FoundDependencyFunc func);
+		public abstract Gum.Address find_export_by_name (string symbol_name);
+		public static Gum.Address find_global_export_by_name (string symbol_name);
+		public abstract Gum.Address find_symbol_by_name (string symbol_name);
 	}
 
 	public class ModuleMap : GLib.Object {
 		public ModuleMap ();
 
-		public unowned Gum.ModuleDetails? find (Gum.Address address);
+		public unowned Gum.Module? find (Gum.Address address);
 
 		public void update ();
 	}
@@ -386,9 +416,13 @@ namespace Gum {
 		public bool has_file_descriptor (int fd);
 		public void enumerate_file_descriptors (Gum.Cloak.FoundFDFunc func);
 
+		public void with_lock_held (Gum.Cloak.LockedFunc func);
+		public bool is_locked ();
+
 		public delegate bool FoundThreadFunc (Gum.ThreadId id);
 		public delegate bool FoundRangeFunc (Gum.MemoryRange range);
 		public delegate bool FoundFDFunc (int fd);
+		public delegate void LockedFunc ();
 	}
 
 	public struct CpuContext {
@@ -517,7 +551,7 @@ namespace Gum {
 
 	public delegate void ModifyThreadFunc (Gum.ThreadId thread_id, CpuContext * cpu_context);
 	public delegate bool FoundThreadFunc (Gum.ThreadDetails details);
-	public delegate bool FoundModuleFunc (Gum.ModuleDetails details);
+	public delegate bool FoundModuleFunc (Gum.Module module);
 	public delegate bool FoundRangeFunc (Gum.RangeDetails details);
 	public delegate bool FoundImportFunc (Gum.ImportDetails details);
 	public delegate bool FoundExportFunc (Gum.ExportDetails details);
@@ -540,16 +574,17 @@ namespace Gum {
 		HALTED
 	}
 
-	public struct ThreadDetails {
-		public Gum.ThreadId id;
-		public Gum.ThreadState state;
-		public CpuContext cpu_context;
+	public struct ThreadEntrypoint {
+		Gum.Address routine;
+		Gum.Address parameter;
 	}
 
-	public struct ModuleDetails {
-		public string name;
-		public Gum.MemoryRange? range;
-		public string path;
+	public struct ThreadDetails {
+		public Gum.ThreadFlags flags;
+		public Gum.ThreadId id;
+		public Gum.ThreadState state;
+		public Gum.CpuContext cpu_context;
+		public Gum.ThreadEntrypoint entrypoint;
 	}
 
 	[CCode (cprefix = "GUM_IMPORT_")]
@@ -692,6 +727,12 @@ namespace Gum {
 		public unowned string symbol_name;
 		public unowned string file_name;
 		public uint line_number;
+	}
+
+	[Flags]
+	public enum AttachFlags {
+		NONE,
+		UNIGNORABLE,
 	}
 
 	[CCode (cprefix = "GUM_ATTACH_")]
@@ -1024,7 +1065,7 @@ namespace Gum {
 		public uint64 vm_size;
 		public uint64 file_offset;
 		public uint64 file_size;
-		public Gum.DarwinPageProtection protection;
+		public Gum.PageProtection protection;
 	}
 
 	public struct ElfSectionDetails {

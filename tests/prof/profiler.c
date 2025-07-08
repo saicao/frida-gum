@@ -1,13 +1,11 @@
 /*
- * Copyright (C) 2008-2010 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2008-2025 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  * Copyright (C) 2008 Christian Berentsen <jc.berentsen@gmail.com>
  *
  * Licence: wxWindows Library Licence, Version 3.1
  */
 
 #include "profiler-fixture.c"
-
-#ifdef HAVE_WINDOWS
 
 TESTLIST_BEGIN (profiler)
 #ifdef HAVE_I386
@@ -151,16 +149,16 @@ REPORT_TESTCASE (xml_basic)
   example_a (fixture->fake_sampler);
 
   assert_same_xml (fixture,
-      "<ProfileReport>"
-        "<Thread>"
-          "<Node name=\"example_a\" total_calls=\"1\" total_duration=\"9\">"
-            "<WorstCase duration=\"9\"></WorstCase>"
-            "<Node name=\"example_c\" total_calls=\"1\" total_duration=\"4\">"
-              "<WorstCase duration=\"4\"></WorstCase>"
-            "</Node>"
-          "</Node>"
-        "</Thread>"
-      "</ProfileReport>");
+      "<profile-report>\n"
+      "  <thread>\n"
+      "    <node name=\"example_a\" total-calls=\"1\" total-duration=\"9\">\n"
+      "      <worst-case duration=\"9\" />\n"
+      "      <node name=\"example_c\" total-calls=\"1\" total-duration=\"4\">\n"
+      "        <worst-case duration=\"4\" />\n"
+      "      </node>\n"
+      "    </node>\n"
+      "  </thread>\n"
+      "</profile-report>");
 }
 
 REPORT_TESTCASE (xml_loop)
@@ -170,18 +168,18 @@ REPORT_TESTCASE (xml_loop)
   example_cyclic_a (fixture->fake_sampler, 1);
 
   assert_same_xml (fixture,
-      "<ProfileReport>"
-        "<Thread>"
-          "<Node name=\"example_cyclic_a\" total_calls=\"2\" "
-              "total_duration=\"4\">"
-            "<WorstCase duration=\"4\"></WorstCase>"
-            "<Node name=\"example_cyclic_b\" total_calls=\"1\" "
-                "total_duration=\"3\">"
-              "<WorstCase duration=\"3\"></WorstCase>"
-            "</Node>"
-          "</Node>"
-        "</Thread>"
-      "</ProfileReport>");
+      "<profile-report>\n"
+      "  <thread>\n"
+      "    <node name=\"example_cyclic_a\" total-calls=\"2\" "
+                 "total-duration=\"4\">\n"
+      "      <worst-case duration=\"4\" />\n"
+      "      <node name=\"example_cyclic_b\" total-calls=\"1\" "
+                 "total-duration=\"3\">\n"
+      "        <worst-case duration=\"3\" />\n"
+      "      </node>\n"
+      "    </node>\n"
+      "  </thread>\n"
+      "</profile-report>");
 }
 
 REPORT_TESTCASE (xml_loop_implicit)
@@ -192,26 +190,26 @@ REPORT_TESTCASE (xml_loop_implicit)
   example_cyclic_b (fixture->fake_sampler, 0);
 
   assert_same_xml (fixture,
-      "<ProfileReport>"
-        "<Thread>"
-          "<Node name=\"example_cyclic_b\" total_calls=\"2\" "
-              "total_duration=\"6\">"
-            "<WorstCase duration=\"3\"></WorstCase>"
-            "<Node name=\"example_cyclic_a\" total_calls=\"3\" "
-                "total_duration=\"5\">"
-              "<WorstCase duration=\"4\"></WorstCase>"
-            "</Node>"
-          "</Node>"
-          "<Node name=\"example_cyclic_a\" total_calls=\"3\" "
-              "total_duration=\"5\">"
-            "<WorstCase duration=\"4\"></WorstCase>"
-            "<Node name=\"example_cyclic_b\" total_calls=\"2\" "
-                "total_duration=\"6\">"
-              "<WorstCase duration=\"3\"></WorstCase>"
-            "</Node>"
-          "</Node>"
-        "</Thread>"
-      "</ProfileReport>");
+      "<profile-report>\n"
+      "  <thread>\n"
+      "    <node name=\"example_cyclic_b\" total-calls=\"2\" "
+              "total-duration=\"6\">\n"
+      "      <worst-case duration=\"3\" />\n"
+      "      <node name=\"example_cyclic_a\" total-calls=\"3\" "
+                "total-duration=\"5\">\n"
+      "        <worst-case duration=\"4\" />\n"
+      "      </node>\n"
+      "    </node>\n"
+      "    <node name=\"example_cyclic_a\" total-calls=\"3\" "
+              "total-duration=\"5\">\n"
+      "      <worst-case duration=\"4\" />\n"
+      "      <node name=\"example_cyclic_b\" total-calls=\"2\" "
+                "total-duration=\"6\">\n"
+      "        <worst-case duration=\"3\" />\n"
+      "      </node>\n"
+      "    </node>\n"
+      "  </thread>\n"
+      "</profile-report>");
 }
 
 REPORT_TESTCASE (xml_multiple_threads)
@@ -223,79 +221,104 @@ REPORT_TESTCASE (xml_multiple_threads)
       (GThreadFunc) example_d, fixture->fake_sampler));
 
   assert_same_xml (fixture,
-      "<ProfileReport>"
-        "<Thread>"
-          "<Node name=\"example_d\" total_calls=\"1\" total_duration=\"11\">"
-            "<WorstCase duration=\"11\"></WorstCase>"
-            "<Node name=\"example_c\" total_calls=\"1\" total_duration=\"4\">"
-              "<WorstCase duration=\"4\"></WorstCase>"
-            "</Node>"
-          "</Node>"
-        "</Thread>"
-        "<Thread>"
-          "<Node name=\"example_a\" total_calls=\"1\" total_duration=\"9\">"
-            "<WorstCase duration=\"9\"></WorstCase>"
-            "<Node name=\"example_c\" total_calls=\"1\" total_duration=\"4\">"
-              "<WorstCase duration=\"4\"></WorstCase>"
-            "</Node>"
-          "</Node>"
-        "</Thread>"
-      "</ProfileReport>");
+      "<profile-report>\n"
+      "  <thread>\n"
+      "    <node name=\"example_d\" total-calls=\"1\" total-duration=\"11\">\n"
+      "      <worst-case duration=\"11\" />\n"
+      "      <node name=\"example_c\" total-calls=\"1\" total-duration=\"4\">\n"
+      "        <worst-case duration=\"4\" />\n"
+      "      </node>\n"
+      "    </node>\n"
+      "  </thread>\n"
+      "  <thread>\n"
+      "    <node name=\"example_a\" total-calls=\"1\" total-duration=\"9\">\n"
+      "      <worst-case duration=\"9\" />\n"
+      "      <node name=\"example_c\" total-calls=\"1\" total-duration=\"4\">\n"
+      "        <worst-case duration=\"4\" />\n"
+      "      </node>\n"
+      "    </node>\n"
+      "  </thread>\n"
+      "</profile-report>");
 }
 
 REPORT_TESTCASE (xml_worst_case_info)
 {
   gum_profiler_instrument_function_with_inspector (fixture->profiler,
       &example_worst_case_info, fixture->sampler, inspect_worst_case_info,
-      NULL);
+      NULL, NULL);
 
   example_worst_case_info (fixture->fake_sampler, "early", 1);
   example_worst_case_info (fixture->fake_sampler, "mid", 3);
   example_worst_case_info (fixture->fake_sampler, "late", 2);
 
   assert_same_xml (fixture,
-      "<ProfileReport>"
-        "<Thread>"
-          "<Node name=\"example_worst_case_info\" total_calls=\"3\" "
-              "total_duration=\"6\">"
-            "<WorstCase duration=\"3\">mid</WorstCase>"
-          "</Node>"
-        "</Thread>"
-      "</ProfileReport>");
+      "<profile-report>\n"
+      "  <thread>\n"
+      "    <node name=\"example_worst_case_info\" total-calls=\"3\" "
+               "total-duration=\"6\">\n"
+      "      <worst-case duration=\"3\">mid</worst-case>\n"
+      "    </node>\n"
+      "  </thread>\n"
+      "</profile-report>");
 }
 
 REPORT_TESTCASE (xml_thread_ordering)
 {
+  GThread * t1, * t2, * td;
   instrument_simple_functions (fixture);
 
   simple_1 (fixture->fake_sampler);
-  g_thread_join (g_thread_new ("profiler-test-helper-a",
-      (GThreadFunc) simple_2, fixture->fake_sampler));
-  g_thread_join (g_thread_new ("profiler-test-helper-b",
-      (GThreadFunc) simple_3, fixture->fake_sampler));
+
+  /*
+   * These threads must run in series since our fake sampler isn't re-entrant.
+   */
+  t1 = g_thread_new ("profiler-test-helper-a", (GThreadFunc) simple_2,
+      fixture->fake_sampler);
+  g_thread_join (t1);
+
+  /*
+   * Some OSes (QNX) aggressively recycle thread IDs. Avoid t1 and t2 having
+   * the same thread ID by creating a new thread in the interim. We don't join
+   * this thread until later so that it can't be reaped.
+   */
+  td = g_thread_new ("dummy", (GThreadFunc) dummy, fixture->fake_sampler);
+
+  t2 = g_thread_new ("profiler-test-helper-b", (GThreadFunc) simple_3,
+      fixture->fake_sampler);
+  g_thread_join (t2);
 
   assert_same_xml (fixture,
-      "<ProfileReport>"
-        "<Thread>"
-          "<Node name=\"simple_3\" total_calls=\"1\" total_duration=\"3\">"
-            "<WorstCase duration=\"3\"></WorstCase>"
-          "</Node>"
-        "</Thread>"
-        "<Thread>"
-          "<Node name=\"simple_2\" total_calls=\"1\" total_duration=\"2\">"
-            "<WorstCase duration=\"2\"></WorstCase>"
-          "</Node>"
-        "</Thread>"
-        "<Thread>"
-          "<Node name=\"simple_1\" total_calls=\"1\" total_duration=\"1\">"
-            "<WorstCase duration=\"1\"></WorstCase>"
-          "</Node>"
-        "</Thread>"
-      "</ProfileReport>");
+      "<profile-report>\n"
+      "  <thread>\n"
+      "    <node name=\"simple_3\" total-calls=\"1\" total-duration=\"3\">\n"
+      "      <worst-case duration=\"3\" />\n"
+      "    </node>\n"
+      "  </thread>\n"
+      "  <thread>\n"
+      "    <node name=\"simple_2\" total-calls=\"1\" total-duration=\"2\">\n"
+      "      <worst-case duration=\"2\" />\n"
+      "    </node>\n"
+      "  </thread>\n"
+      "  <thread>\n"
+      "    <node name=\"simple_1\" total-calls=\"1\" total-duration=\"1\">\n"
+      "      <worst-case duration=\"1\" />\n"
+      "    </node>\n"
+      "  </thread>\n"
+      "</profile-report>");
+
+  g_thread_join (td);
 }
 
 TESTCASE (profile_matching_functions)
 {
+#ifdef HAVE_DARWIN
+  if (!g_test_slow ())
+  {
+    g_print ("<skipping due to CoreSymbolication issue, run in slow mode> ");
+    return;
+  }
+#endif
+
   gum_profiler_instrument_functions_matching (fixture->profiler, "simple_*",
       fixture->sampler, exclude_simple_stdcall_50, NULL);
 
@@ -347,7 +370,7 @@ TESTCASE (worst_case_info)
 {
   gum_profiler_instrument_function_with_inspector (fixture->profiler,
       &example_worst_case_info, fixture->sampler, inspect_worst_case_info,
-      NULL);
+      NULL, NULL);
 
   g_assert_cmpstr (gum_profiler_get_worst_case_info_of (fixture->profiler, 0,
       &example_worst_case_info), ==, "");
@@ -364,12 +387,10 @@ TESTCASE (worst_case_info_on_recursion)
 {
   gum_profiler_instrument_function_with_inspector (fixture->profiler,
       &example_worst_case_recursive, fixture->sampler,
-      inspect_recursive_worst_case_info, NULL);
+      inspect_recursive_worst_case_info, NULL, NULL);
 
   example_worst_case_recursive (2, fixture->fake_sampler);
 
   g_assert_cmpstr (gum_profiler_get_worst_case_info_of (fixture->profiler, 0,
       &example_worst_case_recursive), ==, "2");
 }
-
-#endif /* HAVE_WINDOWS */

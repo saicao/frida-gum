@@ -1,18 +1,16 @@
 /*
- * Copyright (C) 2015-2022 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2015-2024 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  * Copyright (C) 2022 Francesco Tamagni <mrmacete@protonmail.ch>
  * Copyright (C) 2023 Fabian Freyer <fabian.freyer@physik.tu-berlin.de>
  *
  * Licence: wxWindows Library Licence, Version 3.1
  */
 
-#ifndef GUM_DIET
-
 #include "gumdarwinmodule.h"
 
 #include "gumdarwinmodule-priv.h"
 #ifdef HAVE_DARWIN
-# include "backend-darwin/gumdarwin.h"
+# include "gum/gumdarwin.h"
 #endif
 #include "gumleb.h"
 #include "gumkernel.h"
@@ -2522,6 +2520,7 @@ gum_darwin_module_take_image (GumDarwinModule * self,
         if (strcmp (segment.name, "__TEXT") == 0)
         {
           self->preferred_address = segment.vm_address;
+          self->text_size = segment.vm_size;
         }
 
         break;
@@ -2853,7 +2852,7 @@ gum_darwin_module_image_dup (const GumDarwinModuleImage * other)
   }
   else
   {
-    image->malloc_data = g_memdup (other->data, other->size);
+    image->malloc_data = g_memdup2 (other->data, other->size);
     image->data = image->malloc_data;
   }
 
@@ -3114,5 +3113,3 @@ gum_pointer_size_from_cpu_type (GumDarwinCpuType cpu_type)
       return 0;
   }
 }
-
-#endif

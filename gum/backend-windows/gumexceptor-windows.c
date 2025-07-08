@@ -1,21 +1,12 @@
 /*
- * Copyright (C) 2015-2023 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2015-2024 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  *
  * Licence: wxWindows Library Licence, Version 3.1
  */
 
 #include "gumexceptorbackend.h"
 
-#include "gumwindows.h"
-#include "gumx86writer.h"
-
-#include <capstone.h>
-#include <tchar.h>
-
-#ifndef GUM_DIET
-
-typedef BOOL (WINAPI * GumWindowsExceptionHandler) (
-    EXCEPTION_RECORD * exception_record, CONTEXT * context);
+#include "gum/gumwindows.h"
 
 struct _GumExceptorBackend
 {
@@ -24,25 +15,18 @@ struct _GumExceptorBackend
   GumExceptionHandler handler;
   gpointer handler_data;
 
-  GumWindowsExceptionHandler system_handler;
-
-  gpointer dispatcher_impl;
-  gint32 * dispatcher_impl_call_immediate;
-  DWORD previous_page_protection;
-
-  gpointer trampoline;
+  void * vectored_handler;
 };
 
 static void gum_exceptor_backend_finalize (GObject * object);
 
-static BOOL gum_exceptor_backend_dispatch (EXCEPTION_RECORD * exception_record,
-    CONTEXT * context);
+static LONG NTAPI gum_exceptor_backend_dispatch (
+    EXCEPTION_POINTERS * exception_info);
 
 G_DEFINE_TYPE (GumExceptorBackend, gum_exceptor_backend, G_TYPE_OBJECT)
 
 static GumExceptorBackend * the_backend = NULL;
-
-#endif
+static GPrivate gum_active_context_key;
 
 void
 _gum_exceptor_backend_prepare_to_fork (void)
@@ -59,8 +43,6 @@ _gum_exceptor_backend_recover_from_fork_in_child (void)
 {
 }
 
-#ifndef GUM_DIET
-
 static void
 gum_exceptor_backend_class_init (GumExceptorBackendClass * klass)
 {
@@ -72,105 +54,18 @@ gum_exceptor_backend_class_init (GumExceptorBackendClass * klass)
 static void
 gum_exceptor_backend_init (GumExceptorBackend * self)
 {
-  HMODULE ntdll_mod;
-  csh capstone;
-  G_GNUC_UNUSED cs_err err;
-  guint offset;
-
   the_backend = self;
 
-  ntdll_mod = GetModuleHandle (_T ("ntdll.dll"));
-  g_assert (ntdll_mod != NULL);
-
-  self->dispatcher_impl = GUM_FUNCPTR_TO_POINTER (
-      GetProcAddress (ntdll_mod, "KiUserExceptionDispatcher"));
-  g_assert (self->dispatcher_impl != NULL);
-
-  gum_cs_arch_register_native ();
-  err = cs_open (CS_ARCH_X86, GUM_CPU_MODE, &capstone);
-  g_assert (err == CS_ERR_OK);
-  err = cs_option (capstone, CS_OPT_DETAIL, CS_OPT_ON);
-  g_assert (err == CS_ERR_OK);
-
-  offset = 0;
-  while (self->system_handler == NULL)
-  {
-    cs_insn * insn = NULL;
-
-    cs_disasm (capstone,
-        (guint8 *) self->dispatcher_impl + offset, 16,
-        GPOINTER_TO_SIZE (self->dispatcher_impl) + offset,
-        1, &insn);
-    g_assert (insn != NULL);
-
-    offset += insn->size;
-
-    if (insn->id == X86_INS_CALL)
-    {
-      cs_x86_op * op = &insn->detail->x86.operands[0];
-      if (op->type == X86_OP_IMM)
-      {
-        guint8 * call_start, * call_end;
-        gssize distance;
-
-        call_start = GSIZE_TO_POINTER (insn->address);
-        call_end = call_start + insn->size;
-
-        self->system_handler = GUM_POINTER_TO_FUNCPTR (
-            GumWindowsExceptionHandler, op->imm);
-
-        VirtualProtect (self->dispatcher_impl, 4096,
-            PAGE_EXECUTE_READWRITE, &self->previous_page_protection);
-        self->dispatcher_impl_call_immediate = (gint32 *) (call_start + 1);
-
-        distance = (gssize) gum_exceptor_backend_dispatch - (gssize) call_end;
-        if (!GUM_IS_WITHIN_INT32_RANGE (distance))
-        {
-          GumAddressSpec as;
-          GumX86Writer cw;
-
-          as.near_address = self->dispatcher_impl;
-          as.max_distance = (G_MAXINT32 - 16384);
-          self->trampoline = gum_alloc_n_pages_near (1, GUM_PAGE_RWX, &as);
-
-          gum_x86_writer_init (&cw, self->trampoline);
-          gum_x86_writer_put_jmp_address (&cw,
-              GUM_ADDRESS (gum_exceptor_backend_dispatch));
-          gum_x86_writer_clear (&cw);
-
-          distance = (gssize) self->trampoline - (gssize) call_end;
-        }
-
-        *self->dispatcher_impl_call_immediate = distance;
-      }
-    }
-
-    cs_free (insn, 1);
-  }
-
-  cs_close (&capstone);
+  self->vectored_handler =
+      AddVectoredExceptionHandler (TRUE, gum_exceptor_backend_dispatch);
 }
 
 static void
 gum_exceptor_backend_finalize (GObject * object)
 {
   GumExceptorBackend * self = GUM_EXCEPTOR_BACKEND (object);
-  DWORD prot;
 
-  *self->dispatcher_impl_call_immediate =
-      (gssize) self->system_handler -
-      (gssize) (self->dispatcher_impl_call_immediate + 1);
-
-  VirtualProtect (self->dispatcher_impl, 4096,
-      self->previous_page_protection, &prot);
-
-  self->system_handler = NULL;
-
-  self->dispatcher_impl = NULL;
-  self->dispatcher_impl_call_immediate = NULL;
-  self->previous_page_protection = 0;
-
-  g_clear_pointer (&self->trampoline, gum_free_pages);
+  RemoveVectoredExceptionHandler (self->vectored_handler);
 
   the_backend = NULL;
 
@@ -190,15 +85,16 @@ gum_exceptor_backend_new (GumExceptionHandler handler,
   return backend;
 }
 
-static BOOL
-gum_exceptor_backend_dispatch (EXCEPTION_RECORD * exception_record,
-                               CONTEXT * context)
+static LONG NTAPI
+gum_exceptor_backend_dispatch (EXCEPTION_POINTERS * exception_info)
 {
+  EXCEPTION_RECORD * exception_record = exception_info->ExceptionRecord;
+  CONTEXT * context = exception_info->ContextRecord;
   GumExceptorBackend * self = the_backend;
   GumExceptionDetails ed;
   GumExceptionMemoryDetails * md = &ed.memory;
   GumCpuContext * cpu_context = &ed.context;
-  GumWindowsExceptionHandler system_handler;
+  gboolean handled;
 
   ed.thread_id = gum_process_get_current_thread_id ();
 
@@ -275,15 +171,21 @@ gum_exceptor_backend_dispatch (EXCEPTION_RECORD * exception_record,
   gum_windows_parse_context (context, cpu_context);
   ed.native_context = context;
 
-  if (self->handler (&ed, self->handler_data))
+  g_private_set (&gum_active_context_key, context);
+  handled = self->handler (&ed, self->handler_data);
+  g_private_set (&gum_active_context_key, NULL);
+
+  if (handled)
   {
     gum_windows_unparse_context (cpu_context, context);
-    return TRUE;
+    return EXCEPTION_CONTINUE_EXECUTION;
   }
 
-  system_handler = self->system_handler;
-
-  return system_handler (exception_record, context);
+  return EXCEPTION_CONTINUE_SEARCH;
 }
 
-#endif
+CONTEXT *
+gum_windows_get_active_exceptor_context (void)
+{
+  return g_private_get (&gum_active_context_key);
+}

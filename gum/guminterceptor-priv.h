@@ -1,6 +1,7 @@
 /*
- * Copyright (C) 2008-2022 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2008-2025 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  * Copyright (C) 2008 Christian Berentsen <jc.berentsen@gmail.com>
+ * Copyright (C) 2024 Yannis Juglaret <yjuglaret@mozilla.com>
  *
  * Licence: wxWindows Library Licence, Version 3.1
  */
@@ -42,6 +43,7 @@ struct _GumFunctionContext
   guint8 destroyed;
   guint8 activated;
   guint8 has_on_leave_listener;
+  guint8 has_unignorable_listener;
 
   GumCodeSlice * trampoline_slice;
   GumCodeDeflector * trampoline_deflector;
@@ -68,7 +70,7 @@ struct _GumFunctionContext
 G_GNUC_INTERNAL void _gum_interceptor_init (void);
 G_GNUC_INTERNAL void _gum_interceptor_deinit (void);
 
-G_GNUC_INTERNAL void _gum_function_context_begin_invocation (
+G_GNUC_INTERNAL gboolean _gum_function_context_begin_invocation (
     GumFunctionContext * function_ctx, GumCpuContext * cpu_context,
     gpointer * caller_ret_addr, gpointer * next_hop);
 G_GNUC_INTERNAL void _gum_function_context_end_invocation (
@@ -94,8 +96,8 @@ G_GNUC_INTERNAL gpointer _gum_interceptor_backend_get_function_address (
     GumFunctionContext * ctx);
 G_GNUC_INTERNAL gpointer _gum_interceptor_backend_resolve_redirect (
     GumInterceptorBackend * self, gpointer address);
-G_GNUC_INTERNAL gboolean _gum_interceptor_backend_can_intercept (
-    GumInterceptorBackend * self, gpointer function_address);
+G_GNUC_INTERNAL gsize _gum_interceptor_backend_detect_hook_size (
+    gconstpointer code, csh capstone, cs_insn * insn);
 
 G_GNUC_INTERNAL gpointer _gum_interceptor_peek_top_caller_return_address (void);
 G_GNUC_INTERNAL gpointer _gum_interceptor_translate_top_return_address (

@@ -16,6 +16,10 @@ gumjs_sources = [
   'gumcmodule.c',
 ]
 
+if host_os_family == 'windows'
+  gumjs_sources += 'gumansi.c'
+endif
+
 if sqlite_dep.found()
   gumjs_sources += 'gummemoryvfs.c'
 endif
@@ -25,7 +29,6 @@ if quickjs_dep.found()
     'gumistralkeritransformer.c',
     'gumquickscriptbackend.c',
     'gumquickscript.c',
-    'gumquickbundle.c',
     'gumquickvalue.c',
     'gumquickobject.c',
     'gumquickcore.c',
@@ -36,8 +39,6 @@ if quickjs_dep.found()
     'gumquickmodule.c',
     'gumquickfile.c',
     'gumquickchecksum.c',
-    'gumquickstream.c',
-    'gumquicksocket.c',
     'gumquickinterceptor.c',
     'gumquickstalker.c',
     'gumquickeventsink.c',
@@ -48,13 +49,21 @@ if quickjs_dep.found()
     'gumquickcodewriter.c',
     'gumquickcoderelocator.c',
     'gumquickcloak.c',
+    'gumquickprofiler.c',
+    'gumquicksampler.c',
   ]
+  if host_os_family != 'none'
+    gumjs_sources += [
+      'gumquickstream.c',
+      'gumquicksocket.c',
+    ]
+  endif
   if sqlite_dep.found()
     gumjs_sources += 'gumquickdatabase.c'
   endif
 
   quickcompile = executable('quickcompile', 'gumquickcompile.c',
-    dependencies: [quickjs_dep_native],
+    dependencies: [quickjs_dep_native, gio_dep_native],
     native: true,
   )
 else
@@ -66,7 +75,6 @@ if v8_dep.found()
     'gumv8scriptbackend.cpp',
     'gumv8script.cpp',
     'gumv8platform.cpp',
-    'gumv8bundle.cpp',
     'gumv8scope.cpp',
     'gumv8value.cpp',
     'gumv8object.cpp',
@@ -78,8 +86,6 @@ if v8_dep.found()
     'gumv8module.cpp',
     'gumv8file.cpp',
     'gumv8checksum.cpp',
-    'gumv8stream.cpp',
-    'gumv8socket.cpp',
     'gumv8interceptor.cpp',
     'gumv8stalker.cpp',
     'gumv8eventsink.cpp',
@@ -90,29 +96,40 @@ if v8_dep.found()
     'gumv8codewriter.cpp',
     'gumv8coderelocator.cpp',
     'gumv8cloak.cpp',
+    'gumv8profiler.cpp',
+    'gumv8sampler.cpp',
   ]
+  if host_os_family != 'none'
+    gumjs_sources += [
+      'gumv8stream.cpp',
+      'gumv8socket.cpp',
+    ]
+  endif
   if sqlite_dep.found()
     gumjs_sources += 'gumv8database.cpp'
   endif
 endif
 
 gumjs_generated_origins = [
-  'arch-x86/gumx86writer.h',
-  'arch-x86/gumx86relocator.h',
-  'arch-arm/gumarmwriter.h',
-  'arch-arm/gumarmrelocator.h',
-  'arch-arm/gumthumbwriter.h',
-  'arch-arm/gumthumbrelocator.h',
-  'arch-arm64/gumarm64writer.h',
-  'arch-arm64/gumarm64relocator.h',
-  'arch-mips/gummipswriter.h',
-  'arch-mips/gummipsrelocator.h',
+  'arch-x86' / 'gumx86writer.h',
+  'arch-x86' / 'gumx86relocator.h',
+  'arch-arm' / 'gumarmwriter.h',
+  'arch-arm' / 'gumarmrelocator.h',
+  'arch-arm' / 'gumthumbwriter.h',
+  'arch-arm' / 'gumthumbrelocator.h',
+  'arch-arm64' / 'gumarm64writer.h',
+  'arch-arm64' / 'gumarm64relocator.h',
+  'arch-mips' / 'gummipswriter.h',
+  'arch-mips' / 'gummipsrelocator.h',
 ]
 gumjs_generated_inputs = []
 foreach o : gumjs_generated_origins
-  gumjs_generated_inputs += join_paths(meson.project_source_root(), 'gum', o)
+  gumjs_generated_inputs += meson.project_source_root() / 'gum' / o
 endforeach
-gumjs_generated_outputs = []
+gumjs_generated_outputs = [
+  'api-types.d.ts',
+  'api-reference.md',
+]
 runtimes = []
 if quickjs_dep.found()
   runtimes += 'quick'
@@ -150,63 +167,55 @@ foreach r : runtimes
 endforeach
 
 gumjs_runtime_sources = [
-  'runtime/entrypoint-quickjs.js',
-  'runtime/entrypoint-v8.js',
-  'runtime/core.js',
-  'runtime/message-dispatcher.js',
-  'runtime/error-handler-quickjs.js',
-  'runtime/error-handler-v8.js',
-  'runtime/console.js',
-  'runtime/hexdump.js',
-  'runtime/worker.js',
-  'runtime/objc.js',
-  'runtime/swift.js',
-  'runtime/java.js',
-  'runtime/cmodule-tcc/inttypes.h',
-  'runtime/cmodule-tcc/stdint.h',
-  'runtime/cmodule-tcc/stdio.h',
-  'runtime/cmodule-tcc/stdlib.h',
-  'runtime/cmodule-tcc/string.h',
-  'runtime/cmodule/glib.h',
-  'runtime/cmodule/gum/gumdefs.h',
-  'runtime/cmodule/gum/gumprocess.h',
-  'runtime/cmodule/gum/gummodulemap.h',
-  'runtime/cmodule/gum/gummemory.h',
-  'runtime/cmodule/gum/guminterceptor.h',
-  'runtime/cmodule/gum/gumstalker.h',
-  'runtime/cmodule/gum/gummetalarray.h',
-  'runtime/cmodule/gum/gummetalhash.h',
-  'runtime/cmodule/gum/gumspinlock.h',
-  'runtime/cmodule/gum/gumtls.h',
-  'runtime/cmodule/json-glib/json-glib.h',
+  'runtime' / 'entrypoint-quickjs.js',
+  'runtime' / 'entrypoint-v8.js',
+  'runtime' / 'core.js',
+  'runtime' / 'message-dispatcher.js',
+  'runtime' / 'error-handler-quickjs.js',
+  'runtime' / 'error-handler-v8.js',
+  'runtime' / 'console.js',
+  'runtime' / 'hexdump.js',
+  'runtime' / 'worker.js',
+  'runtime' / 'cmodule-tcc' / 'inttypes.h',
+  'runtime' / 'cmodule-tcc' / 'stdint.h',
+  'runtime' / 'cmodule-tcc' / 'stdio.h',
+  'runtime' / 'cmodule-tcc' / 'stdlib.h',
+  'runtime' / 'cmodule-tcc' / 'string.h',
+  'runtime' / 'cmodule' / 'glib.h',
+  'runtime' / 'cmodule' / 'gum' / 'gumdefs.h',
+  'runtime' / 'cmodule' / 'gum' / 'gumprocess.h',
+  'runtime' / 'cmodule' / 'gum' / 'gummodule.h',
+  'runtime' / 'cmodule' / 'gum' / 'gummodulemap.h',
+  'runtime' / 'cmodule' / 'gum' / 'gummemory.h',
+  'runtime' / 'cmodule' / 'gum' / 'guminterceptor.h',
+  'runtime' / 'cmodule' / 'gum' / 'gumstalker.h',
+  'runtime' / 'cmodule' / 'gum' / 'gummetalarray.h',
+  'runtime' / 'cmodule' / 'gum' / 'gummetalhash.h',
+  'runtime' / 'cmodule' / 'gum' / 'gumspinlock.h',
+  'runtime' / 'cmodule' / 'gum' / 'gumtls.h',
+  'runtime' / 'cmodule' / 'json-glib' / 'json-glib.h',
 ]
 gumjs_runtime_outputs = [
+  'runtime.bundle',
   'gumcmodule-runtime.h',
 ]
 if quickjs_dep.found()
-  gumjs_runtime_outputs += [
-    'gumquickscript-runtime.h',
-    'gumquickscript-objc.h',
-    'gumquickscript-java.h',
-  ]
+  gumjs_runtime_outputs += 'gumquickscript-runtime.h'
 endif
 if v8_dep.found()
-  gumjs_runtime_outputs += [
-    'gumv8script-runtime.h',
-    'gumv8script-objc.h',
-    'gumv8script-java.h',
-  ]
+  gumjs_runtime_outputs += 'gumv8script-runtime.h'
 endif
 
-install_headers(gumjs_headers, subdir: install_header_basedir + '/gumjs')
+install_headers(gumjs_headers, subdir: install_header_basedir / 'gumjs')
 
 gumjs_generated_bindings = custom_target('gumjs-generated-bindings',
   input: gumjs_generated_inputs,
   output: gumjs_generated_outputs,
   command: [
-    find_program('generate-bindings.py'),
-    join_paths(meson.project_source_root(), 'gum'),
+    python,
+    files('generate-bindings.py'),
     meson.current_build_dir(),
+    meson.project_source_root() / 'gum',
   ],
 )
 gumjs_sources += [gumjs_generated_bindings]
@@ -233,22 +242,26 @@ gumjs_runtime = custom_target('gumjs-runtime',
   input: gumjs_runtime_sources,
   output: gumjs_runtime_outputs,
   command: [
-    find_program('generate-runtime.py'),
-    ','.join(backends),
-    host_arch,
-    host_machine.endian(),
+    python,
+    files('generate-runtime.py'),
+    meson.current_build_dir(),
+    '@PRIVATE_DIR@',
     meson.current_source_dir(),
     meson.project_source_root() / 'gum',
     capstone_dep.get_variable('includedir') / 'capstone',
     libtcc_incdir,
     quickcompile,
-    meson.current_build_dir(),
+    ','.join(backends),
+    host_arch,
+    host_machine.endian(),
+    '@INPUT@',
   ],
 )
 gumjs_sources += [gumjs_runtime]
 
 gumjs_deps = [
   gum_dep,
+  gum_prof_dep,
 
   quickjs_dep,
   v8_dep,
@@ -273,64 +286,69 @@ gumjs = library('frida-gumjs-' + api_version, gumjs_sources,
   install: true,
 )
 
+gumjs_vars = [
+  'gumjs_qjs=' + quickjs_dep.found().to_string('enabled', 'disabled'),
+  'gumjs_v8=' + v8_dep.found().to_string('enabled', 'disabled'),
+]
+
 gumjs_dep = declare_dependency(link_with: gumjs,
   include_directories: [bindings_inc, include_directories('.')],
   dependencies: gumjs_deps,
+  variables: gumjs_vars,
 )
 
 pkg = import('pkgconfig')
 pkg.generate(filebase: 'frida-gumjs-' + api_version,
   name: 'GumJS',
-  version: gum_version,
+  version: frida_version,
   description: 'Gum JavaScript bindings',
   requires: ['frida-gum-' + api_version, 'gio-2.0', 'json-glib-1.0'],
   requires_private: ['libffi', 'capstone'] + gumjs_extra_requires,
   subdirs: install_header_basedir,
   libraries: [gumjs],
-  variables: [
-    'gumjs_qjs=' + quickjs_dep.found().to_string('enabled', 'disabled'),
-    'gumjs_v8=' + v8_dep.found().to_string('enabled', 'disabled'),
-  ],
+  variables: gumjs_vars,
 )
 
 meson.override_dependency('frida-gumjs-' + api_version, gumjs_dep)
 
-gumjs_inspector_headers = [
-  'guminspectorserver.h',
-]
+if libsoup_dep.found()
+  gumjs_inspector_headers = [
+    'guminspectorserver.h',
+  ]
 
-gumjs_inspector_sources = [
-  'guminspectorserver.c',
-]
+  gumjs_inspector_sources = [
+    'guminspectorserver.c',
+  ]
 
-install_headers(gumjs_inspector_headers, subdir: install_header_basedir + '/gumjs')
+  install_headers(gumjs_inspector_headers, subdir: install_header_basedir / 'gumjs')
 
-gumjs_inspector_deps = [
-  gum_dep,
-  json_glib_dep,
-  libsoup_dep,
-]
+  gumjs_inspector_deps = [
+    gum_dep,
+    json_glib_dep,
+    libsoup_dep,
+  ]
 
-gumjs_inspector = library('frida-gumjs-inspector-' + api_version, gumjs_inspector_sources,
-  c_args: frida_component_cflags,
-  dependencies: gumjs_inspector_deps,
-  install: true,
-)
+  gumjs_inspector = library('frida-gumjs-inspector-' + api_version, gumjs_inspector_sources,
+    c_args: frida_component_cflags,
+    dependencies: gumjs_inspector_deps,
+    install: true,
+  )
 
-gumjs_inspector_dep = declare_dependency(link_with: gumjs_inspector,
-  include_directories: [bindings_inc],
-  dependencies: gumjs_inspector_deps,
-)
+  gumjs_inspector_dep = declare_dependency(link_with: gumjs_inspector,
+    include_directories: [bindings_inc],
+    dependencies: gumjs_inspector_deps,
+  )
 
-pkg.generate(filebase: 'frida-gumjs-inspector-' + api_version,
-  name: 'GumJS Inspector',
-  version: gum_version,
-  description: 'GumJS Inspector components',
-  subdirs: install_header_basedir,
-  libraries: [gumjs_inspector],
-)
+  pkg.generate(filebase: 'frida-gumjs-inspector-' + api_version,
+    name: 'GumJS Inspector',
+    version: frida_version,
+    description: 'GumJS Inspector components',
+    subdirs: install_header_basedir,
+    libraries: [gumjs_inspector],
+  )
 
-meson.override_dependency('frida-gumjs-inspector-' + api_version, gumjs_inspector_dep)
+  meson.override_dependency('frida-gumjs-inspector-' + api_version, gumjs_inspector_dep)
+endif
 
 if 'gumjs' in get_option('devkits')
   subdir('devkit')

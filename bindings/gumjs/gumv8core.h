@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2010-2022 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2010-2025 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  * Copyright (C) 2020-2021 Francesco Tamagni <mrmacete@protonmail.ch>
  * Copyright (C) 2021 Abdelrahman Eid <hot3eed@gmail.com>
  *
@@ -14,7 +14,6 @@
 #include "gumv8script.h"
 #include "gumv8scriptbackend.h"
 
-#include <ffi.h>
 #include <gum/gumexceptor.h>
 #include <gum/gumprocess.h>
 #include <v8.h>
@@ -42,7 +41,6 @@ struct GumV8Core
 {
   GumV8Script * script;
   GumV8ScriptBackend * backend;
-  const gchar * runtime_source_map;
   GumV8Core * core;
   GumV8MessageEmitter message_emitter;
   GumScriptScheduler * scheduler;
@@ -104,7 +102,6 @@ struct GumV8Core
   v8::Global<v8::String> * value_key;
   v8::Global<v8::String> * system_error_key;
 
-  v8::Global<v8::FunctionTemplate> * native_callback;
   v8::Global<v8::FunctionTemplate> * callback_context;
   v8::Global<v8::Object> * callback_context_value;
 
@@ -142,27 +139,26 @@ struct GumV8ByteArray
   GumV8Core * core;
 };
 
-struct GumV8NativeCallback
+class GumV8SystemErrorPreservationScope
 {
-  gint ref_count;
+public:
+  GumV8SystemErrorPreservationScope ()
+    : saved_error (gum_thread_get_system_error ())
+  {
+  }
 
-  v8::Global<v8::Object> * wrapper;
+  ~GumV8SystemErrorPreservationScope ()
+  {
+    gum_thread_set_system_error (saved_error);
+  }
 
-  v8::Global<v8::Function> * func;
-  ffi_closure * closure;
-  ffi_cif cif;
-  ffi_type ** atypes;
-  GSList * data;
-
-  gint interceptor_replacement_count;
-
-  GumV8Core * core;
+  gint saved_error;
 };
 
 G_GNUC_INTERNAL void _gum_v8_core_init (GumV8Core * self,
-    GumV8Script * script, const gchar * runtime_source_map,
-    GumV8MessageEmitter message_emitter, GumScriptScheduler * scheduler,
-    v8::Isolate * isolate, v8::Local<v8::ObjectTemplate> scope);
+    GumV8Script * script, GumV8MessageEmitter message_emitter,
+    GumScriptScheduler * scheduler, v8::Isolate * isolate,
+    v8::Local<v8::ObjectTemplate> scope);
 G_GNUC_INTERNAL void _gum_v8_core_realize (GumV8Core * self);
 G_GNUC_INTERNAL gboolean _gum_v8_core_flush (GumV8Core * self,
     GumV8FlushNotify flush_notify);

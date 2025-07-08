@@ -1,6 +1,6 @@
 /*
- * Copyright (C) 2010-2023 Ole André Vadla Ravnås <oleavr@nowsecure.com>
- * Copyright (C) 2023 Håvard Sørbø <havard@hsorbo.no>
+ * Copyright (C) 2010-2025 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2023-2024 Håvard Sørbø <havard@hsorbo.no>
  * Copyright (C) 2023 Francesco Tamagni <mrmacete@protonmail.ch>
  * Copyright (C) 2023 Grant Douglas <me@hexplo.it>
  *
@@ -9,16 +9,15 @@
 
 #include "gumprocess-priv.h"
 
-#include "backend-elf/gumprocess-elf.h"
 #include "gum-init.h"
-#include "gumandroid.h"
-#include "gumelfmodule.h"
-#include "gumlinux.h"
+#include "gummodule-elf.h"
+#include "gum/gumandroid.h"
+#include "gum/gumlinux.h"
 #include "gumlinux-priv.h"
 #include "gummodulemap.h"
 #include "valgrind.h"
 
-#include <dlfcn.h>
+#include <capstone.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <sched.h>
@@ -26,6 +25,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+typedef guint32 u32;
+#include <linux/futex.h>
 #ifdef HAVE_PTHREAD_ATTR_GETSTACK
 # include <pthread.h>
 #endif
@@ -44,36 +45,76 @@
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/uio.h>
+#include <sys/utsname.h>
 #include <sys/wait.h>
 #ifdef HAVE_SYS_USER_H
 # include <sys/user.h>
 #endif
 
-#define GUM_PAGE_START(value, page_size) \
-    (GUM_ADDRESS (value) & ~GUM_ADDRESS (page_size - 1))
+#ifdef HAVE_GLIBC
+# include <gnu/libc-version.h>
+#endif
 
 #ifndef O_CLOEXEC
 # define O_CLOEXEC 0x80000
 #endif
 
+#ifndef FUTEX_WAIT_PRIVATE
+# define FUTEX_PRIVATE_FLAG 128
+# define FUTEX_WAIT_PRIVATE (FUTEX_WAIT | FUTEX_PRIVATE_FLAG)
+# define FUTEX_WAKE_PRIVATE (FUTEX_WAKE | FUTEX_PRIVATE_FLAG)
+#endif
+
 #define GUM_PSR_THUMB 0x20
 
 #if defined (HAVE_I386)
-# define GumRegs struct user_regs_struct
+typedef struct user_regs_struct GumGPRegs;
+typedef struct _GumX86DebugRegs GumDebugRegs;
 #elif defined (HAVE_ARM)
-# define GumRegs struct pt_regs
+typedef struct pt_regs GumGPRegs;
+typedef struct _GumArmDebugRegs GumDebugRegs;
 #elif defined (HAVE_ARM64)
-# define GumRegs struct user_pt_regs
+typedef struct user_pt_regs GumGPRegs;
+typedef struct _GumArm64DebugRegs GumDebugRegs;
 #elif defined (HAVE_MIPS)
-# define GumRegs struct pt_regs
+typedef struct pt_regs GumGPRegs;
+typedef struct _GumMipsDebugRegs GumDebugRegs;
 #else
 # error Unsupported architecture
 #endif
+
+#ifdef HAVE_GLIBC
+# define GUM_MAX_LIST_WALK_ATTEMPTS        10
+# define GUM_LINUX_MAX_THREADS             (256 * 1024)
+# define GUM_MAX_FIND_LIST_HEAD_ATTEMPTS   5
+# define GUM_MAX_FIND_LIST_ANCHOR_ATTEMPTS 10
+# define GUM_MAX_PTHREAD_SIZE              2048
+# define GUM_TID_CHECK_TIMES               5
+# define GUM_MAX_INSTRUCTION_SIZE          15
+# define GUM_THREAD_STACK_SIZE             0x20000
+#endif
+
+typedef guint GumMipsWatchStyle;
+typedef struct _GumMips32WatchRegs GumMips32WatchRegs;
+typedef struct _GumMips64WatchRegs GumMips64WatchRegs;
+typedef union _GumRegs GumRegs;
 #ifndef PTRACE_GETREGS
 # define PTRACE_GETREGS 12
 #endif
 #ifndef PTRACE_SETREGS
 # define PTRACE_SETREGS 13
+#endif
+#ifndef PTRACE_GETHBPREGS
+# define PTRACE_GETHBPREGS 29
+#endif
+#ifndef PTRACE_SETHBPREGS
+# define PTRACE_SETHBPREGS 30
+#endif
+#ifndef PTRACE_GET_WATCH_REGS
+# define PTRACE_GET_WATCH_REGS 0xd0
+#endif
+#ifndef PTRACE_SET_WATCH_REGS
+# define PTRACE_SET_WATCH_REGS 0xd1
 #endif
 #ifndef PTRACE_GETREGSET
 # define PTRACE_GETREGSET 0x4204
@@ -88,6 +129,8 @@
 # define NT_PRSTATUS 1
 #endif
 
+#define GUM_NSIG 65
+
 #define GUM_TEMP_FAILURE_RETRY(expression) \
     ({ \
       gssize __result; \
@@ -98,53 +141,109 @@
       __result; \
     })
 
-typedef struct _GumProgramModules GumProgramModules;
-typedef guint GumProgramRuntimeLinker;
-typedef struct _GumProgramRanges GumProgramRanges;
-typedef ElfW(auxv_t) * (* GumReadAuxvFunc) (void);
-
 typedef struct _GumModifyThreadContext GumModifyThreadContext;
+typedef void (* GumLinuxModifyThreadFunc) (GumThreadId thread_id,
+    GumRegs * regs, gpointer user_data);
+typedef struct _GumLinuxModifyThreadContext GumLinuxModifyThreadContext;
+typedef guint GumLinuxRegsType;
 typedef guint8 GumModifyThreadAck;
 
-typedef struct _GumEnumerateModulesContext GumEnumerateModulesContext;
-typedef struct _GumResolveModuleNameContext GumResolveModuleNameContext;
-
-typedef gint (* GumFoundDlPhdrFunc) (struct dl_phdr_info * info,
-    gsize size, gpointer data);
-typedef void (* GumDlIteratePhdrImpl) (GumFoundDlPhdrFunc func, gpointer data);
+typedef struct _GumSetHardwareBreakpointContext GumSetHardwareBreakpointContext;
+typedef struct _GumSetHardwareWatchpointContext GumSetHardwareWatchpointContext;
 
 typedef struct _GumUserDesc GumUserDesc;
 typedef struct _GumTcbHead GumTcbHead;
 
 typedef gint (* GumCloneFunc) (gpointer arg);
 
-struct _GumProgramModules
+#if defined (HAVE_GLIBC)
+typedef struct _GumLinuxThreadCtx GumLinuxThreadCtx;
+typedef struct _GumTestByAddressContext GumTestByAddressContext;
+typedef struct _GumLinuxGlobalsFragment GumLinuxGlobalsFragment;
+#elif defined (HAVE_MUSL)
+typedef struct _GumMuslStartArgs GumMuslStartArgs;
+#endif
+
+struct _GumModifyThreadContext
 {
-  GumModuleDetails program;
-  GumModuleDetails interpreter;
-  GumModuleDetails vdso;
-  GumProgramRuntimeLinker rtld;
+  GumModifyThreadFunc func;
+  gpointer user_data;
 };
 
-enum _GumProgramRuntimeLinker
+enum _GumLinuxRegsType
 {
-  GUM_PROGRAM_RTLD_NONE,
-  GUM_PROGRAM_RTLD_SHARED,
+  GUM_REGS_GENERAL_PURPOSE,
+  GUM_REGS_DEBUG_BREAK,
+  GUM_REGS_DEBUG_WATCH,
 };
 
-struct _GumProgramRanges
+struct _GumX86DebugRegs
 {
-  GumMemoryRange program;
-  GumMemoryRange interpreter;
-  GumMemoryRange vdso;
+  gsize dr0;
+  gsize dr1;
+  gsize dr2;
+  gsize dr3;
+  gsize dr6;
+  gsize dr7;
+};
+
+struct _GumArmDebugRegs
+{
+  guint32 cr[16];
+  guint32 vr[16];
+};
+
+struct _GumArm64DebugRegs
+{
+  guint64 cr[16];
+  guint64 vr[16];
+};
+
+enum _GumMipsWatchStyle
+{
+  GUM_MIPS_WATCH_MIPS32,
+  GUM_MIPS_WATCH_MIPS64,
+};
+
+struct _GumMips32WatchRegs
+{
+  guint32 watch_lo[8];
+  guint16 watch_hi[8];
+  guint16 watch_masks[8];
+  guint32 num_valid;
+} __attribute__ ((aligned (8)));
+
+struct _GumMips64WatchRegs
+{
+  guint64 watch_lo[8];
+  guint16 watch_hi[8];
+  guint16 watch_masks[8];
+  guint32 num_valid;
+} __attribute__ ((aligned (8)));
+
+struct _GumMipsDebugRegs
+{
+  GumMipsWatchStyle style;
+  union
+  {
+    GumMips32WatchRegs mips32;
+    GumMips64WatchRegs mips64;
+  };
+};
+
+union _GumRegs
+{
+  GumGPRegs gp;
+  GumDebugRegs debug;
 };
 
 enum _GumModifyThreadAck
 {
-  GUM_ACK_READY = 1,
-  GUM_ACK_READ_CONTEXT,
-  GUM_ACK_MODIFIED_CONTEXT,
-  GUM_ACK_WROTE_CONTEXT,
+  GUM_ACK_INVALID,
+  GUM_ACK_READY,
+  GUM_ACK_READ_REGISTERS,
+  GUM_ACK_MODIFIED_REGISTERS,
+  GUM_ACK_WROTE_REGISTERS,
   GUM_ACK_FAILED_TO_ATTACH,
   GUM_ACK_FAILED_TO_WAIT,
   GUM_ACK_FAILED_TO_STOP,
@@ -153,19 +252,15 @@ enum _GumModifyThreadAck
   GUM_ACK_FAILED_TO_DETACH
 };
 
-struct _GumModifyThreadContext
+struct _GumLinuxModifyThreadContext
 {
-  gint fd[2];
   GumThreadId thread_id;
-  GumCpuContext cpu_context;
-};
-
-struct _GumEnumerateModulesContext
-{
-  GumFoundModuleFunc func;
+  GumLinuxRegsType regs_type;
+  GumLinuxModifyThreadFunc func;
   gpointer user_data;
 
-  GHashTable * named_ranges;
+  gint fd[2];
+  GumRegs regs_data;
 };
 
 struct _GumEmitExecutableModuleContext
@@ -177,12 +272,18 @@ struct _GumEmitExecutableModuleContext
   gboolean carry_on;
 };
 
-struct _GumResolveModuleNameContext
+struct _GumSetHardwareBreakpointContext
 {
-  const gchar * name;
-  GumAddress known_address;
-  gchar * path;
-  GumAddress base;
+  guint breakpoint_id;
+  GumAddress address;
+};
+
+struct _GumSetHardwareWatchpointContext
+{
+  guint watchpoint_id;
+  GumAddress address;
+  gsize size;
+  GumWatchConditions conditions;
 };
 
 struct _GumUserDesc
@@ -210,65 +311,139 @@ struct _GumTcbHead
 #endif
 };
 
-static void gum_deinit_program_modules (void);
-static gboolean gum_query_program_ranges (GumReadAuxvFunc read_auxv,
-    GumProgramRanges * ranges);
-static ElfW(auxv_t) * gum_read_auxv_from_proc (void);
-static ElfW(auxv_t) * gum_read_auxv_from_stack (void);
-static gboolean gum_query_main_thread_stack_range (GumMemoryRange * range);
-static void gum_compute_elf_range_from_ehdr (const ElfW(Ehdr) * ehdr,
-    GumMemoryRange * range);
-static void gum_compute_elf_range_from_phdrs (const ElfW(Phdr) * phdrs,
-    ElfW(Half) phdr_size, ElfW(Half) phdr_count, GumAddress base_address,
-    GumMemoryRange * range);
+#if defined (HAVE_GLIBC)
 
-static gchar * gum_try_init_libc_name (void);
+struct _GumLinuxThreadCtx
+{
+  pthread_t thread;
+  void * stack;
+
+  GMutex mutex;
+  GCond cond;
+  gboolean start;
+  gboolean exit;
+
+  GumThreadId tid;
+  gpointer ret;
+};
+
+struct _GumTestByAddressContext
+{
+  GumAddress address;
+  gboolean found;
+  gboolean is_pthread_globals;
+  gchar * last_file;
+};
+
+struct _GumLinuxGlobalsFragment
+{
+  GumGlibcList _dl_stack_used;
+  GumGlibcList _dl_stack_user;
+  GumGlibcList _dl_stack_cache;
+  size_t _dl_stack_cache_actsize;
+  uintptr_t _dl_in_flight_stack;
+  int _dl_stack_cache_lock;
+};
+
+#elif defined (HAVE_MUSL)
+
+struct _GumMuslStartArgs
+{
+  gpointer start_func;
+  gpointer start_arg;
+  volatile int control;
+  gulong sig_mask[GUM_NSIG / 8 / sizeof (long)];
+};
+
+#endif
+
 static gboolean gum_try_resolve_dynamic_symbol (const gchar * name,
     Dl_info * info);
-static void gum_deinit_libc_name (void);
 
-static gint gum_do_modify_thread (gpointer data);
-static gboolean gum_await_ack (gint fd, GumModifyThreadAck expected_ack);
+static void gum_do_modify_thread (GumThreadId thread_id, GumRegs * regs,
+    gpointer user_data);
+static gboolean gum_linux_modify_thread (GumThreadId thread_id,
+    GumLinuxRegsType regs_type, GumLinuxModifyThreadFunc func,
+    gpointer user_data, GError ** error);
+static gpointer gum_linux_handle_modify_thread_comms (gpointer data);
+static gint gum_linux_do_modify_thread (gpointer data);
+static gboolean gum_await_ack (gint fd, GumModifyThreadAck expected_ack,
+    GumModifyThreadAck * received_ack);
 static void gum_put_ack (gint fd, GumModifyThreadAck ack);
 
-static void gum_store_cpu_context (GumThreadId thread_id,
-    GumCpuContext * cpu_context, gpointer user_data);
-
-static void gum_do_enumerate_modules (const gchar * libc_name,
-    GumFoundModuleFunc func, gpointer user_data);
-static void gum_process_enumerate_modules_by_using_libc (
-    GumDlIteratePhdrImpl iterate_phdr, GumFoundModuleFunc func,
-    gpointer user_data);
-static gint gum_emit_module_from_phdr (struct dl_phdr_info * info, gsize size,
-    gpointer user_data);
+static GumModule * gum_try_init_libc_module (void);
+static void gum_deinit_libc_module (void);
+static const Dl_info * gum_try_init_libc_info (void);
 
 static void gum_linux_named_range_free (GumLinuxNamedRange * range);
-static gboolean gum_try_translate_vdso_name (gchar * name);
-static void * gum_module_get_handle (const gchar * module_name);
-static void * gum_module_get_symbol (void * module, const gchar * symbol_name);
-
-static gboolean gum_do_resolve_module_name (const gchar * name,
-    const gchar * libc_name, gchar ** path, GumAddress * base);
-static gboolean gum_store_module_path_and_base_if_match (
-    const GumModuleDetails * details, gpointer user_data);
+#ifdef HAVE_GLIBC
+static gboolean gum_linux_get_threads_from_list (
+    const GumLinuxPThreadSpec * spec, const GumGlibcList * anchor,
+    GList ** threads);
+#endif
+static GumThreadState gum_thread_state_from_proc_status_character (gchar c);
+static void gum_store_cpu_context (GumThreadId thread_id,
+    GumCpuContext * cpu_context, gpointer user_data);
+static void gum_do_set_hardware_breakpoint (GumThreadId thread_id,
+    GumRegs * regs, gpointer user_data);
+static void gum_do_unset_hardware_breakpoint (GumThreadId thread_id,
+    GumRegs * regs, gpointer user_data);
+static void gum_do_set_hardware_watchpoint (GumThreadId thread_id,
+    GumRegs * regs, gpointer user_data);
+static void gum_do_unset_hardware_watchpoint (GumThreadId thread_id,
+    GumRegs * regs, gpointer user_data);
 
 static void gum_proc_maps_iter_init_for_path (GumProcMapsIter * iter,
     const gchar * path);
 
-static void gum_acquire_dumpability (void);
-static void gum_release_dumpability (void);
-
-static gchar * gum_thread_read_name (GumThreadId thread_id);
-static gboolean gum_thread_read_state (GumThreadId tid, GumThreadState * state);
-static GumThreadState gum_thread_state_from_proc_status_character (gchar c);
 static GumPageProtection gum_page_protection_from_proc_perms_string (
     const gchar * perms);
 
-static gssize gum_get_regs (pid_t pid, GumRegs * regs);
-static gssize gum_set_regs (pid_t pid, const GumRegs * regs);
+static gssize gum_get_regs (pid_t pid, guint type, gpointer data, gsize * size);
+static gssize gum_set_regs (pid_t pid, guint type, gconstpointer data,
+    gsize size);
 
-static void gum_parse_regs (const GumRegs * regs, GumCpuContext * ctx);
-static void gum_unparse_regs (const GumCpuContext * ctx, GumRegs * regs);
+static void gum_parse_gp_regs (const GumGPRegs * regs, GumCpuContext * ctx);
+static void gum_unparse_gp_regs (const GumCpuContext * ctx, GumGPRegs * regs);
+
+static gboolean gum_detect_pthread_internals (GumLinuxPThreadSpec * spec);
+#if defined (HAVE_GLIBC)
+static gboolean gum_linux_find_list_head (GumLinuxPThreadSpec * spec);
+static gboolean gum_linux_find_list_head_offset (GumLinuxPThreadSpec * spec,
+    GumLinuxThreadCtx * first, GumLinuxThreadCtx * second);
+static gboolean gum_linux_find_start_offsets (GumLinuxPThreadSpec * spec);
+static gboolean gum_linux_find_tid_offset (GumLinuxPThreadSpec * spec);
+static gboolean gum_linux_check_thread_offset (gsize offset, gboolean * match);
+static gboolean gum_linux_find_list_anchor (GumLinuxPThreadSpec * spec,
+    gboolean custom_stack);
+static void gum_test_by_address_context_init (GumTestByAddressContext * ctx,
+    GumAddress address);
+static void gum_test_by_address_context_free (GumTestByAddressContext * ctx);
+static gboolean gum_test_pthread_globals_if_containing_address (
+    const GumRangeDetails * details, GumTestByAddressContext * fc);
+static gboolean gum_linux_find_lock (GumLinuxPThreadSpec * spec);
+static gboolean gum_linux_get_libc_version (guint * major, guint * minor);
+static gboolean gum_linux_find_start_impl (GumLinuxPThreadSpec * spec);
+static gboolean gum_linux_is_call (cs_insn * insn);
+static gboolean gum_linux_create_thread (GumLinuxThreadCtx * ctx,
+    gboolean custom_stack);
+static gboolean gum_linux_dispose_thread (GumLinuxThreadCtx * ctx);
+static gpointer gum_linux_thread_proc (gpointer param);
+static gboolean gum_linux_thread_read_flink (const GumLinuxPThreadSpec * spec,
+    pthread_t current, pthread_t * next);
+static gboolean gum_linux_thread_read_blink (const GumLinuxPThreadSpec * spec,
+    pthread_t current, pthread_t * prev);
+static void glibc_lock_acquire (GumGlibcLock * lock);
+static void glibc_lock_release (GumGlibcLock * lock);
+#endif
+#ifdef HAVE_MUSL
+# ifdef HAVE_ARM
+static gpointer gum_parse_ldrpc (const uint8_t * code, csh capstone,
+    cs_insn * insn);
+# endif
+static GumMuslStartArgs * gum_query_pthread_start_args (pthread_t thread,
+    const GumLinuxPThreadSpec * spec);
+#endif
 
 static gssize gum_libc_clone (GumCloneFunc child_func, gpointer child_stack,
     gint flags, gpointer arg, pid_t * parent_tidptr, GumUserDesc * tls,
@@ -282,390 +457,14 @@ static gssize gum_libc_ptrace (gsize request, pid_t pid, gpointer address,
 #define gum_libc_syscall_3(n, a, b, c) gum_libc_syscall_4 (n, a, b, c, 0)
 static gssize gum_libc_syscall_4 (gsize n, gsize a, gsize b, gsize c, gsize d);
 
-static GumProgramModules gum_program_modules;
-static gchar * gum_libc_name;
+static GumModule * gum_libc_module;
+static Dl_info gum_libc_info;
 
 static gboolean gum_is_regset_supported = TRUE;
 
 G_LOCK_DEFINE_STATIC (gum_dumpable);
 static gint gum_dumpable_refcount = 0;
 static gint gum_dumpable_previous = 0;
-
-static const GumProgramModules *
-gum_query_program_modules (void)
-{
-  static gsize modules_value = 0;
-
-  if (g_once_init_enter (&modules_value))
-  {
-    static GumProgramRanges ranges;
-    gboolean got_kern, got_user;
-    GumProgramRanges kern, user;
-    GumProcMapsIter iter;
-    gchar * path;
-    const gchar * line;
-
-    got_kern = gum_query_program_ranges (gum_read_auxv_from_proc, &kern);
-    got_user = gum_query_program_ranges (gum_read_auxv_from_stack, &user);
-    if (got_kern && got_user &&
-        user.program.base_address != kern.program.base_address)
-    {
-      ranges = user;
-      ranges.interpreter = kern.program;
-    }
-    else if (got_kern)
-      ranges = kern;
-    else
-      ranges = user;
-
-    gum_program_modules.program.range = &ranges.program;
-    gum_program_modules.interpreter.range = &ranges.interpreter;
-    gum_program_modules.vdso.range = &ranges.vdso;
-    gum_program_modules.rtld = (ranges.interpreter.base_address == 0)
-        ? GUM_PROGRAM_RTLD_NONE
-        : GUM_PROGRAM_RTLD_SHARED;
-
-    gum_proc_maps_iter_init_for_self (&iter);
-    path = g_malloc (PATH_MAX);
-
-    while (gum_proc_maps_iter_next (&iter, &line))
-    {
-      GumAddress start;
-      GumModuleDetails * m;
-
-      sscanf (line, "%" G_GINT64_MODIFIER "x-", &start);
-
-      if (start == ranges.program.base_address)
-        m = &gum_program_modules.program;
-      else if (start == ranges.interpreter.base_address)
-        m = &gum_program_modules.interpreter;
-      else
-        continue;
-
-      sscanf (line, "%*x-%*x %*c%*c%*c%*c %*x %*s %*d %[^\n]", path);
-
-      m->path = g_strdup (path);
-      m->name = strrchr (m->path, '/');
-      if (m->name != NULL)
-        m->name++;
-      else
-        m->name = m->path;
-    }
-
-    g_free (path);
-    gum_proc_maps_iter_destroy (&iter);
-
-    if (ranges.vdso.base_address != 0)
-    {
-      GumModuleDetails * m = &gum_program_modules.vdso;
-      /* FIXME: Parse soname instead of hardcoding: */
-      m->path = g_strdup ("linux-vdso.so.1");
-      m->name = m->path;
-    }
-
-    _gum_register_destructor (gum_deinit_program_modules);
-
-    g_once_init_leave (&modules_value, GPOINTER_TO_SIZE (&gum_program_modules));
-  }
-
-  return GSIZE_TO_POINTER (modules_value);
-}
-
-static void
-gum_deinit_program_modules (void)
-{
-  GumProgramModules * m = &gum_program_modules;
-
-  g_free ((gchar *) m->program.path);
-  g_free ((gchar *) m->interpreter.path);
-  g_free ((gchar *) m->vdso.path);
-}
-
-static gboolean
-gum_query_program_ranges (GumReadAuxvFunc read_auxv,
-                          GumProgramRanges * ranges)
-{
-  gboolean success = FALSE;
-  ElfW(auxv_t) * auxv;
-  const ElfW(Phdr) * phdrs;
-  ElfW(Half) phdr_size, phdr_count;
-  const ElfW(Ehdr) * interpreter, * vdso;
-  ElfW(auxv_t) * entry;
-
-  bzero (ranges, sizeof (GumProgramRanges));
-
-  auxv = read_auxv ();
-  if (auxv == NULL)
-    goto beach;
-
-  phdrs = NULL;
-  phdr_size = 0;
-  phdr_count = 0;
-  interpreter = NULL;
-  vdso = NULL;
-  for (entry = auxv; entry->a_type != AT_NULL; entry++)
-  {
-    switch (entry->a_type)
-    {
-      case AT_PHDR:
-        phdrs = (ElfW(Phdr) *) entry->a_un.a_val;
-        break;
-      case AT_PHENT:
-        phdr_size = entry->a_un.a_val;
-        break;
-      case AT_PHNUM:
-        phdr_count = entry->a_un.a_val;
-        break;
-      case AT_BASE:
-        interpreter = (const ElfW(Ehdr) *) entry->a_un.a_val;
-        break;
-      case AT_SYSINFO_EHDR:
-        vdso = (const ElfW(Ehdr) *) entry->a_un.a_val;
-        break;
-    }
-  }
-  if (phdrs == NULL || phdr_size == 0 || phdr_count == 0)
-    goto beach;
-
-  gum_compute_elf_range_from_phdrs (phdrs, phdr_size, phdr_count, 0,
-      &ranges->program);
-  gum_compute_elf_range_from_ehdr (interpreter, &ranges->interpreter);
-  gum_compute_elf_range_from_ehdr (vdso, &ranges->vdso);
-
-  success = TRUE;
-
-beach:
-  g_free (auxv);
-
-  return success;
-}
-
-static ElfW(auxv_t) *
-gum_read_auxv_from_proc (void)
-{
-  ElfW(auxv_t) * auxv = NULL;
-
-  gum_acquire_dumpability ();
-
-  g_file_get_contents ("/proc/self/auxv", (gchar **) &auxv, NULL, NULL);
-
-  gum_release_dumpability ();
-
-  return auxv;
-}
-
-static ElfW(auxv_t) *
-gum_read_auxv_from_stack (void)
-{
-  GumMemoryRange stack;
-  gpointer stack_start, stack_end;
-  ElfW(auxv_t) needle;
-  const ElfW(auxv_t) * match, * last_match;
-  gsize offset;
-  const ElfW(auxv_t) * cursor, * auxv_start, * auxv_end;
-  gsize page_size;
-
-  if (!gum_query_main_thread_stack_range (&stack))
-    return NULL;
-  stack_start = GSIZE_TO_POINTER (stack.base_address);
-  stack_end = stack_start + stack.size;
-
-  needle.a_type = AT_PHENT;
-  needle.a_un.a_val = sizeof (ElfW(Phdr));
-
-  match = NULL;
-  last_match = NULL;
-  offset = 0;
-  while (offset != stack.size)
-  {
-    match = memmem (GSIZE_TO_POINTER (stack.base_address) + offset,
-        stack.size - offset, &needle, sizeof (needle));
-    if (match == NULL)
-      break;
-
-    last_match = match;
-    offset = (GUM_ADDRESS (match) - stack.base_address) + 1;
-  }
-  if (last_match == NULL)
-    return NULL;
-
-  auxv_start = NULL;
-  page_size = gum_query_page_size ();
-  for (cursor = last_match - 1;
-      (gpointer) cursor >= stack_start;
-      cursor--)
-  {
-    gboolean probably_an_invalid_type = cursor->a_type >= page_size;
-    if (probably_an_invalid_type)
-    {
-      auxv_start = cursor + 1;
-      break;
-    }
-  }
-
-  auxv_end = NULL;
-  for (cursor = last_match + 1;
-      (gpointer) cursor <= stack_end - sizeof (ElfW(auxv_t));
-      cursor++)
-  {
-    if (cursor->a_type == AT_NULL)
-    {
-      auxv_end = cursor + 1;
-      break;
-    }
-  }
-  if (auxv_end == NULL)
-    return NULL;
-
-  return g_memdup (auxv_start, (guint8 *) auxv_end - (guint8 *) auxv_start);
-}
-
-static gboolean
-gum_query_main_thread_stack_range (GumMemoryRange * range)
-{
-  GumProcMapsIter iter;
-  GumAddress stack_bottom, stack_top;
-  const gchar * line;
-
-  gum_proc_maps_iter_init_for_self (&iter);
-
-  stack_bottom = 0;
-  stack_top = 0;
-
-  while (gum_proc_maps_iter_next (&iter, &line))
-  {
-    if (g_str_has_suffix (line, " [stack]"))
-    {
-      sscanf (line,
-          "%" G_GINT64_MODIFIER "x-%" G_GINT64_MODIFIER "x ",
-          &stack_bottom,
-          &stack_top);
-      break;
-    }
-  }
-
-  range->base_address = stack_bottom;
-  range->size = stack_top - stack_bottom;
-
-  gum_proc_maps_iter_destroy (&iter);
-
-  return range->size != 0;
-}
-
-static void
-gum_compute_elf_range_from_ehdr (const ElfW(Ehdr) * ehdr,
-                                 GumMemoryRange * range)
-{
-  if (ehdr == NULL)
-  {
-    range->base_address = 0;
-    range->size = 0;
-    return;
-  }
-
-  gum_compute_elf_range_from_phdrs ((gconstpointer) ehdr + ehdr->e_phoff,
-      ehdr->e_phentsize, ehdr->e_phnum, GUM_ADDRESS (ehdr), range);
-}
-
-static void
-gum_compute_elf_range_from_phdrs (const ElfW(Phdr) * phdrs,
-                                  ElfW(Half) phdr_size,
-                                  ElfW(Half) phdr_count,
-                                  GumAddress base_address,
-                                  GumMemoryRange * range)
-{
-  GumAddress lowest, highest;
-  gsize page_size;
-  ElfW(Half) i;
-  const ElfW(Phdr) * phdr;
-
-  range->base_address = 0;
-
-  lowest = ~0;
-  highest = 0;
-  page_size = gum_query_page_size ();
-
-  for (i = 0, phdr = phdrs;
-      i != phdr_count;
-      i++, phdr = (gconstpointer) phdr + phdr_size)
-  {
-    if (phdr->p_type == PT_PHDR)
-      range->base_address = GPOINTER_TO_SIZE (phdrs) - phdr->p_offset;
-
-    if (phdr->p_type == PT_LOAD && phdr->p_offset == 0)
-    {
-      if (range->base_address == 0)
-        range->base_address = phdr->p_vaddr;
-    }
-
-    if (phdr->p_type == PT_LOAD)
-    {
-      lowest = MIN (GUM_PAGE_START (phdr->p_vaddr, page_size), lowest);
-      highest = MAX (phdr->p_vaddr + phdr->p_memsz, highest);
-    }
-  }
-
-  if (range->base_address == 0)
-  {
-    range->base_address = (base_address != 0)
-        ? base_address
-        : GUM_PAGE_START (phdrs, page_size);
-  }
-
-  range->size = highest - lowest;
-}
-
-const gchar *
-gum_process_query_libc_name (void)
-{
-  static GOnce once = G_ONCE_INIT;
-
-  g_once (&once, (GThreadFunc) gum_try_init_libc_name, NULL);
-
-  if (once.retval == NULL)
-    gum_panic ("Unable to locate the libc; please file a bug");
-
-  return once.retval;
-}
-
-static gchar *
-gum_try_init_libc_name (void)
-{
-  Dl_info info;
-
-#ifndef HAVE_ANDROID
-  if (!gum_try_resolve_dynamic_symbol ("__libc_start_main", &info))
-#endif
-  {
-    if (!gum_try_resolve_dynamic_symbol ("exit", &info))
-      return NULL;
-  }
-
-#if defined (HAVE_ANDROID) && !defined (GUM_DIET)
-  if (g_path_is_absolute (info.dli_fname))
-  {
-    gum_libc_name = g_strdup (info.dli_fname);
-  }
-  else
-  {
-    gum_libc_name = g_build_filename (
-        "/system",
-        (sizeof (gpointer) == 4) ? "lib" : "lib64",
-        info.dli_fname,
-        NULL);
-  }
-#else
-  {
-    GumAddress base;
-    gum_do_resolve_module_name (info.dli_fname, info.dli_fname, &gum_libc_name,
-        &base);
-  }
-#endif
-
-  _gum_register_destructor (gum_deinit_libc_name);
-
-  return gum_libc_name;
-}
 
 static gboolean
 gum_try_resolve_dynamic_symbol (const gchar * name,
@@ -680,12 +479,6 @@ gum_try_resolve_dynamic_symbol (const gchar * name,
     return FALSE;
 
   return dladdr (address, info) != 0;
-}
-
-static void
-gum_deinit_libc_name (void)
-{
-  g_free (gum_libc_name);
 }
 
 gboolean
@@ -734,171 +527,276 @@ gum_process_modify_thread (GumThreadId thread_id,
                            gpointer user_data,
                            GumModifyThreadFlags flags)
 {
+  GumModifyThreadContext ctx;
+
+  ctx.func = func;
+  ctx.user_data = user_data;
+
+  return gum_linux_modify_thread (thread_id, GUM_REGS_GENERAL_PURPOSE,
+      gum_do_modify_thread, &ctx, NULL);
+}
+
+static void
+gum_do_modify_thread (GumThreadId thread_id,
+                      GumRegs * regs,
+                      gpointer user_data)
+{
+  GumGPRegs * gpr = &regs->gp;
+  GumModifyThreadContext * ctx = user_data;
+  GumCpuContext cpu_context;
+
+  gum_parse_gp_regs (gpr, &cpu_context);
+
+  ctx->func (thread_id, &cpu_context, ctx->user_data);
+
+  gum_unparse_gp_regs (&cpu_context, gpr);
+}
+
+static gboolean
+gum_linux_modify_thread (GumThreadId thread_id,
+                         GumLinuxRegsType regs_type,
+                         GumLinuxModifyThreadFunc func,
+                         gpointer user_data,
+                         GError ** error)
+{
   gboolean success = FALSE;
+  GumLinuxModifyThreadContext ctx;
+  gssize child;
+  gpointer stack = NULL;
+  gpointer tls = NULL;
+  GumUserDesc * desc;
+  guint32 result;
+  GumModifyThreadAck ack;
 
-  if (thread_id == gum_process_get_current_thread_id ())
-  {
-    /*
-     * getcontext/setcontext is not supported on the musl C-runtime (or
-     * Android). musl, however doesn't provide any pre-processor definitions
-     * which allow it to be readily identified. However, the other major
-     * runtimes do, so we use their absence to determine that musl is in use and
-     * hence omit the block.
-     */
-#if !defined (HAVE_ANDROID) && (defined (__GLIBC__) || defined (__UCLIBC__)) \
-    && (!defined (__GLIBC__) || !(defined (__stub_getcontext) \
-        || defined (__stub_setcontext)))
-    ucontext_t uc;
-    volatile gboolean modified = FALSE;
+  ctx.thread_id = thread_id;
+  ctx.regs_type = regs_type;
+  ctx.func = func;
+  ctx.user_data = user_data;
 
-    getcontext (&uc);
-    if (!modified)
-    {
-      GumCpuContext cpu_context;
+  ctx.fd[0] = -1;
+  ctx.fd[1] = -1;
 
-      gum_linux_parse_ucontext (&uc, &cpu_context);
-      func (thread_id, &cpu_context, user_data);
-      gum_linux_unparse_ucontext (&cpu_context, &uc);
+  memset (&ctx.regs_data, 0, sizeof (ctx.regs_data));
 
-      modified = TRUE;
-      setcontext (&uc);
-    }
+  if (socketpair (AF_UNIX, SOCK_STREAM, 0, ctx.fd) != 0)
+    goto socketpair_failed;
 
-    success = TRUE;
-#endif
-  }
-  else
-  {
-    GumModifyThreadContext ctx;
-    gint fd;
-    gssize child;
-    gpointer stack, tls;
-    GumUserDesc * desc;
-
-    if (socketpair (AF_UNIX, SOCK_STREAM, 0, ctx.fd) != 0)
-      return FALSE;
-    ctx.thread_id = thread_id;
-
-    fd = ctx.fd[0];
-
-    stack = gum_alloc_n_pages (1, GUM_PAGE_RW);
-    tls = gum_alloc_n_pages (1, GUM_PAGE_RW);
+  stack = gum_alloc_n_pages (1, GUM_PAGE_RW);
+  tls = gum_alloc_n_pages (1, GUM_PAGE_RW);
 
 #if defined (HAVE_I386) && GLIB_SIZEOF_VOID_P == 4
-    GumUserDesc segment;
-    gint gs;
+  GumUserDesc segment;
+  gint gs;
 
-    asm volatile (
-        "movw %%gs, %w0"
-        : "=q" (gs)
-    );
+  asm volatile (
+      "movw %%gs, %w0"
+      : "=q" (gs)
+  );
 
-    segment.entry_number = (gs & 0xffff) >> 3;
-    segment.base_addr = GPOINTER_TO_SIZE (tls);
-    segment.limit = 0xfffff;
-    segment.seg_32bit = 1;
-    segment.contents = 0;
-    segment.read_exec_only = 0;
-    segment.limit_in_pages = 1;
-    segment.seg_not_present = 0;
-    segment.useable = 1;
+  segment.entry_number = (gs & 0xffff) >> 3;
+  segment.base_addr = GPOINTER_TO_SIZE (tls);
+  segment.limit = 0xfffff;
+  segment.seg_32bit = 1;
+  segment.contents = 0;
+  segment.read_exec_only = 0;
+  segment.limit_in_pages = 1;
+  segment.seg_not_present = 0;
+  segment.useable = 1;
 
-    desc = &segment;
+  desc = &segment;
 #else
-    desc = tls;
+  desc = tls;
 #endif
 
 #if defined (HAVE_I386)
-    {
-      GumTcbHead * head = tls;
+  {
+    GumTcbHead * head = tls;
 
-      head->tcb = tls;
-      head->dtv = GSIZE_TO_POINTER (GPOINTER_TO_SIZE (tls) + 1024);
-      head->self = tls;
-    }
+    head->tcb = tls;
+    head->dtv = GSIZE_TO_POINTER (GPOINTER_TO_SIZE (tls) + 1024);
+    head->self = tls;
+  }
 #endif
 
-    /*
-     * It seems like the only reliable way to read/write the registers of
-     * another thread is to use ptrace(). We used to accomplish this by
-     * hi-jacking the target thread by installing a signal handler and sending a
-     * real-time signal directed at the target thread, and thus relying on the
-     * signal handler getting called in that thread. The signal handler would
-     * then provide us with read/write access to its registers. This hack would
-     * however not work if a thread was for example blocking in poll(), as the
-     * signal would then just get queued and we'd end up waiting indefinitely.
-     *
-     * It is however not possible to ptrace() another thread when we're in the
-     * same process group. This used to be supported in old kernels, but it was
-     * buggy and eventually dropped. So in order to use ptrace() we will need to
-     * spawn a new thread in a different process group so that it can ptrace()
-     * the target thread inside our process group. This is also the solution
-     * recommended by Linus:
-     *
-     * https://lkml.org/lkml/2006/9/1/217
-     *
-     * Because libc implementations don't expose an API to do this, and the
-     * thread setup code is private, where the TLS part is crucial for even just
-     * the syscall wrappers - due to them accessing `errno` - we cannot make any
-     * libc calls in this thread. And because the libc's clone() syscall wrapper
-     * typically writes to the child thread's TLS structures, which we cannot
-     * portably set up correctly, we cannot use the libc clone() syscall wrapper
-     * either.
-     */
-    child = gum_libc_clone (
-        gum_do_modify_thread,
-        stack + gum_query_page_size (),
-        CLONE_VM | CLONE_SETTLS,
-        &ctx,
-        NULL,
-        desc,
-        NULL);
-    if (child == -1)
-      goto beach;
+  /*
+   * It seems like the only reliable way to read/write the registers of
+   * another thread is to use ptrace(). We used to accomplish this by
+   * hi-jacking the target thread by installing a signal handler and sending a
+   * real-time signal directed at the target thread, and thus relying on the
+   * signal handler getting called in that thread. The signal handler would
+   * then provide us with read/write access to its registers. This hack would
+   * however not work if a thread was for example blocking in poll(), as the
+   * signal would then just get queued and we'd end up waiting indefinitely.
+   *
+   * It is however not possible to ptrace() another thread when we're in the
+   * same process group. This used to be supported in old kernels, but it was
+   * buggy and eventually dropped. So in order to use ptrace() we will need to
+   * spawn a new thread in a different process group so that it can ptrace()
+   * the target thread inside our process group. This is also the solution
+   * recommended by Linus:
+   *
+   * https://lkml.org/lkml/2006/9/1/217
+   *
+   * Because libc implementations don't expose an API to do this, and the
+   * thread setup code is private, where the TLS part is crucial for even just
+   * the syscall wrappers - due to them accessing `errno` - we cannot make any
+   * libc calls in this thread. And because the libc's clone() syscall wrapper
+   * typically writes to the child thread's TLS structures, which we cannot
+   * portably set up correctly, we cannot use the libc clone() syscall wrapper
+   * either.
+   */
+  child = gum_libc_clone (
+      gum_linux_do_modify_thread,
+      stack + gum_query_page_size (),
+      CLONE_VM | CLONE_SETTLS,
+      &ctx,
+      NULL,
+      desc,
+      NULL);
+  if (child == -1)
+    goto clone_failed;
 
-    gum_acquire_dumpability ();
+  _gum_acquire_dumpability ();
 
-    prctl (PR_SET_PTRACER, child);
+  prctl (PR_SET_PTRACER, child);
 
-    gum_put_ack (fd, GUM_ACK_READY);
+  if (thread_id == gum_process_get_current_thread_id ())
+  {
+    result = GPOINTER_TO_UINT (g_thread_join (g_thread_new (
+            "gum-modify-thread-worker",
+            gum_linux_handle_modify_thread_comms,
+            &ctx)));
+  }
+  else
+  {
+    result = GPOINTER_TO_UINT (gum_linux_handle_modify_thread_comms (&ctx));
+  }
+  success = (result & 0xffff) != 0;
+  ack = (GumModifyThreadAck) (result >> 16);
 
-    if (gum_await_ack (fd, GUM_ACK_READ_CONTEXT))
+  _gum_release_dumpability ();
+
+  waitpid (child, NULL, __WCLONE);
+
+  if (!success)
+    goto attach_failed;
+
+  goto beach;
+
+socketpair_failed:
+  {
+    g_set_error (error, GUM_ERROR, GUM_ERROR_PERMISSION_DENIED,
+        "Unable to create socketpair");
+    goto beach;
+  }
+clone_failed:
+  {
+    g_set_error (error, GUM_ERROR, GUM_ERROR_PERMISSION_DENIED,
+        "Unable to set up clone");
+    goto beach;
+  }
+attach_failed:
+  {
+    const gchar * detail;
+
+    switch (ack)
     {
-      func (thread_id, &ctx.cpu_context, user_data);
-      gum_put_ack (fd, GUM_ACK_MODIFIED_CONTEXT);
-
-      success = gum_await_ack (fd, GUM_ACK_WROTE_CONTEXT);
+      case GUM_ACK_INVALID:
+        detail = "read from socket";
+        break;
+      case GUM_ACK_FAILED_TO_ATTACH:
+        detail = "attach to thread";
+        break;
+      case GUM_ACK_FAILED_TO_WAIT:
+        detail = "wait for thread";
+        break;
+      case GUM_ACK_FAILED_TO_STOP:
+        detail = "verify thread is stopped";
+        break;
+      case GUM_ACK_FAILED_TO_READ:
+        detail = "read registers";
+        break;
+      case GUM_ACK_FAILED_TO_WRITE:
+        detail = "write registers";
+        break;
+      case GUM_ACK_FAILED_TO_DETACH:
+        detail = "detach from thread";
+        break;
+      default:
+        detail = "communicate with helper thread";
+        break;
     }
 
-    gum_release_dumpability ();
-
-    waitpid (child, NULL, __WCLONE);
-
+    g_set_error (error, GUM_ERROR, GUM_ERROR_PERMISSION_DENIED,
+        "Unable to %s", detail);
+    goto beach;
+  }
 beach:
-    gum_free_pages (tls);
-    gum_free_pages (stack);
+  {
+    g_clear_pointer (&tls, gum_free_pages);
+    g_clear_pointer (&stack, gum_free_pages);
 
-    close (ctx.fd[0]);
-    close (ctx.fd[1]);
+    if (ctx.fd[0] != -1)
+      close (ctx.fd[0]);
+    if (ctx.fd[1] != -1)
+      close (ctx.fd[1]);
+
+    return success;
+  }
+}
+
+static gpointer
+gum_linux_handle_modify_thread_comms (gpointer data)
+{
+  GumLinuxModifyThreadContext * ctx = data;
+  gint fd = ctx->fd[0];
+  gboolean success = FALSE;
+  GumModifyThreadAck received_ack;
+  guint32 result;
+
+  gum_put_ack (fd, GUM_ACK_READY);
+
+  if (gum_await_ack (fd, GUM_ACK_READ_REGISTERS, &received_ack))
+  {
+    ctx->func (ctx->thread_id, &ctx->regs_data, ctx->user_data);
+    gum_put_ack (fd, GUM_ACK_MODIFIED_REGISTERS);
+
+    success = gum_await_ack (fd, GUM_ACK_WROTE_REGISTERS, &received_ack);
   }
 
-  return success;
+  result = (received_ack << 16) | (success ? 1 : 0);
+
+  return GUINT_TO_POINTER (result);
 }
 
 static gint
-gum_do_modify_thread (gpointer data)
+gum_linux_do_modify_thread (gpointer data)
 {
-  GumModifyThreadContext * ctx = data;
+  GumLinuxModifyThreadContext * ctx = data;
   gint fd;
   gboolean attached = FALSE;
   gssize res;
   pid_t wait_result;
   int status;
-  GumRegs regs;
+#if defined (HAVE_I386)
+  const guint x86_debugreg_offsets[] = { 0, 1, 2, 3, 6, 7 };
+#elif defined (HAVE_ARM)
+  guint debug_regs_count = 0;
+#elif defined (HAVE_ARM64)
+  struct user_hwdebug_state debug_regs;
+  const guint debug_regs_type = (ctx->regs_type == GUM_REGS_DEBUG_BREAK)
+      ? NT_ARM_HW_BREAK
+      : NT_ARM_HW_WATCH;
+  gsize debug_regs_size = sizeof (struct user_hwdebug_state);
+  guint debug_regs_count = 0;
+#endif
+#ifndef HAVE_MIPS
+  guint i;
+#endif
 
   fd = ctx->fd[1];
 
-  gum_await_ack (fd, GUM_ACK_READY);
+  gum_await_ack (fd, GUM_ACK_READY, NULL);
 
   res = gum_libc_ptrace (PTRACE_ATTACH, ctx->thread_id, NULL, NULL);
   if (res == -1)
@@ -919,17 +817,136 @@ gum_do_modify_thread (gpointer data)
    * ptrace mention the possible race condition. For our purposes, however, we
    * only require that the target is stopped so that we can read its registers.
    */
-  res = gum_get_regs (ctx->thread_id, &regs);
-  if (res == -1)
-    goto failed_to_read;
-  gum_parse_regs (&regs, &ctx->cpu_context);
-  gum_put_ack (fd, GUM_ACK_READ_CONTEXT);
+  if (ctx->regs_type == GUM_REGS_GENERAL_PURPOSE)
+  {
+    gsize regs_size = sizeof (GumGPRegs);
 
-  gum_await_ack (fd, GUM_ACK_MODIFIED_CONTEXT);
-  gum_unparse_regs (&ctx->cpu_context, &regs);
-  res = gum_set_regs (ctx->thread_id, &regs);
-  if (res == -1)
-    goto failed_to_write;
+    res = gum_get_regs (ctx->thread_id, NT_PRSTATUS, &ctx->regs_data,
+        &regs_size);
+    if (res == -1)
+      goto failed_to_read;
+  }
+  else
+  {
+#if defined (HAVE_I386)
+    for (i = 0; i != G_N_ELEMENTS (x86_debugreg_offsets); i++)
+    {
+      const guint offset = x86_debugreg_offsets[i];
+
+      res = gum_libc_ptrace (PTRACE_PEEKUSER, ctx->thread_id,
+          GSIZE_TO_POINTER (
+            G_STRUCT_OFFSET (struct user, u_debugreg) +
+            (offset * sizeof (gpointer))),
+          &ctx->regs_data.debug.dr0 + i);
+      if (res == -1)
+        goto failed_to_read;
+    }
+#elif defined (HAVE_ARM)
+    guint32 info;
+    res = gum_libc_ptrace (PTRACE_GETHBPREGS, ctx->thread_id, 0, &info);
+    if (res == -1)
+      goto failed_to_read;
+
+    debug_regs_count = (ctx->regs_type == GUM_REGS_DEBUG_BREAK)
+        ? info & 0xff
+        : (info >> 8) & 0xff;
+
+    long step = (ctx->regs_type == GUM_REGS_DEBUG_WATCH) ? -1 : 1;
+    long num = step;
+    for (i = 0; i != debug_regs_count; i++)
+    {
+      res = gum_libc_ptrace (PTRACE_GETHBPREGS, ctx->thread_id,
+          GSIZE_TO_POINTER (num), &ctx->regs_data.debug.vr[i]);
+      if (res == -1)
+        goto failed_to_read;
+      num += step;
+
+      res = gum_libc_ptrace (PTRACE_GETHBPREGS, ctx->thread_id,
+          GSIZE_TO_POINTER (num), &ctx->regs_data.debug.cr[i]);
+      if (res == -1)
+        goto failed_to_read;
+      num += step;
+    }
+#elif defined (HAVE_ARM64)
+    res = gum_get_regs (ctx->thread_id, debug_regs_type, &debug_regs,
+        &debug_regs_size);
+    if (res == -1)
+      goto failed_to_read;
+
+    debug_regs_count = debug_regs.dbg_info & 0xff;
+
+    for (i = 0; i != G_N_ELEMENTS (debug_regs.dbg_regs); i++)
+    {
+      ctx->regs_data.debug.cr[i] = debug_regs.dbg_regs[i].ctrl;
+      ctx->regs_data.debug.vr[i] = debug_regs.dbg_regs[i].addr;
+    }
+#elif defined (HAVE_MIPS)
+    res = gum_libc_ptrace (PTRACE_GET_WATCH_REGS, ctx->thread_id,
+        &ctx->regs_data.debug, NULL);
+    if (res == -1)
+      goto failed_to_read;
+#endif
+  }
+  gum_put_ack (fd, GUM_ACK_READ_REGISTERS);
+
+  gum_await_ack (fd, GUM_ACK_MODIFIED_REGISTERS, NULL);
+  if (ctx->regs_type == GUM_REGS_GENERAL_PURPOSE)
+  {
+    res = gum_set_regs (ctx->thread_id, NT_PRSTATUS, &ctx->regs_data,
+        sizeof (GumGPRegs));
+    if (res == -1)
+      goto failed_to_write;
+  }
+  else
+  {
+#if defined (HAVE_I386)
+    for (i = 0; i != G_N_ELEMENTS (x86_debugreg_offsets); i++)
+    {
+      const guint offset = x86_debugreg_offsets[i];
+      res = gum_libc_ptrace (PTRACE_POKEUSER, ctx->thread_id,
+          GSIZE_TO_POINTER (
+            G_STRUCT_OFFSET (struct user, u_debugreg) +
+            (offset * sizeof (gpointer))),
+          GSIZE_TO_POINTER ((&ctx->regs_data.debug.dr0)[i]));
+      if (res == -1)
+        goto failed_to_write;
+    }
+#elif defined (HAVE_ARM)
+    long step = (ctx->regs_type == GUM_REGS_DEBUG_WATCH) ? -1 : 1;
+    long num = step;
+    for (i = 0; i != debug_regs_count; i++)
+    {
+      res = gum_libc_ptrace (PTRACE_SETHBPREGS, ctx->thread_id,
+          GSIZE_TO_POINTER (num), &ctx->regs_data.debug.vr[i]);
+      if (res == -1)
+        goto failed_to_write;
+      num += step;
+
+      res = gum_libc_ptrace (PTRACE_SETHBPREGS, ctx->thread_id,
+          GSIZE_TO_POINTER (num), &ctx->regs_data.debug.cr[i]);
+      if (res == -1)
+        goto failed_to_write;
+      num += step;
+    }
+#elif defined (HAVE_ARM64)
+    for (i = 0; i != debug_regs_count; i++)
+    {
+      debug_regs.dbg_regs[i].ctrl = ctx->regs_data.debug.cr[i];
+      debug_regs.dbg_regs[i].addr = ctx->regs_data.debug.vr[i];
+    }
+
+    res = gum_set_regs (ctx->thread_id, debug_regs_type, &debug_regs,
+        G_STRUCT_OFFSET (struct user_hwdebug_state, dbg_regs) +
+        debug_regs_count * 16);
+    if (res == -1)
+      goto failed_to_write;
+#elif defined (HAVE_MIPS)
+    res = gum_libc_ptrace (PTRACE_SET_WATCH_REGS, ctx->thread_id,
+        &ctx->regs_data.debug, NULL);
+    if (res == -1)
+      goto failed_to_write;
+#endif
+  }
 
   res = gum_libc_ptrace (PTRACE_DETACH, ctx->thread_id, NULL,
       GINT_TO_POINTER (SIGCONT));
@@ -938,7 +955,7 @@ gum_do_modify_thread (gpointer data)
   if (res == -1)
     goto failed_to_detach;
 
-  gum_put_ack (fd, GUM_ACK_WROTE_CONTEXT);
+  gum_put_ack (fd, GUM_ACK_WROTE_REGISTERS);
 
   goto beach;
 
@@ -986,14 +1003,22 @@ beach:
 
 static gboolean
 gum_await_ack (gint fd,
-               GumModifyThreadAck expected_ack)
+               GumModifyThreadAck expected_ack,
+               GumModifyThreadAck * received_ack)
 {
   guint8 value;
   gssize res;
 
   res = GUM_TEMP_FAILURE_RETRY (gum_libc_read (fd, &value, sizeof (value)));
   if (res == -1)
+  {
+    if (received_ack != NULL)
+      *received_ack = GUM_ACK_INVALID;
     return FALSE;
+  }
+
+  if (received_ack != NULL)
+    *received_ack = (GumModifyThreadAck) value;
 
   return value == expected_ack;
 }
@@ -1010,273 +1035,161 @@ gum_put_ack (gint fd,
 
 void
 _gum_process_enumerate_threads (GumFoundThreadFunc func,
-                                gpointer user_data)
+                                gpointer user_data,
+                                GumThreadFlags flags)
 {
-  GDir * dir;
-  const gchar * name;
-  gboolean carry_on = TRUE;
+  GArray * entries;
+  const GumLinuxPThreadSpec * spec;
+  GumLinuxPThreadIter iter;
+  pthread_t thread;
+  guint i;
 
-  dir = g_dir_open ("/proc/self/task", 0, NULL);
-  g_assert (dir != NULL);
+  entries = g_array_new (FALSE, FALSE, sizeof (GumThreadDetails));
 
-  while (carry_on && (name = g_dir_read_name (dir)) != NULL)
+  spec = gum_linux_query_pthread_spec ();
+
+  gum_linux_lock_pthread_list (spec);
+
+  gum_linux_pthread_iter_init (&iter, spec);
+  while (gum_linux_pthread_iter_next (&iter, &thread))
   {
-    GumThreadDetails details;
-    gchar * thread_name;
+    GumThreadDetails entry = { 0, };
+    gpointer start_routine;
 
-    details.id = atoi (name);
+    entry.id = gum_linux_query_pthread_tid (thread, spec);
 
-    thread_name = gum_thread_read_name (details.id);
-    details.name = thread_name;
-
-    if (gum_thread_read_state (details.id, &details.state))
+    start_routine = gum_linux_query_pthread_start_routine (thread, spec);
+    if (start_routine != NULL)
     {
-      if (gum_process_modify_thread (details.id, gum_store_cpu_context,
-            &details.cpu_context, GUM_MODIFY_THREAD_FLAGS_ABORT_SAFELY))
+      if ((flags & GUM_THREAD_FLAGS_ENTRYPOINT_ROUTINE) != 0)
       {
-        carry_on = func (&details, user_data);
+        entry.entrypoint.routine = GUM_ADDRESS (start_routine);
+        entry.flags |= GUM_THREAD_FLAGS_ENTRYPOINT_ROUTINE;
+      }
+
+      if ((flags & GUM_THREAD_FLAGS_ENTRYPOINT_PARAMETER) != 0)
+      {
+        entry.entrypoint.parameter = GUM_ADDRESS (
+            gum_linux_query_pthread_start_parameter (thread, spec));
+        entry.flags |= GUM_THREAD_FLAGS_ENTRYPOINT_PARAMETER;
       }
     }
 
-    g_free (thread_name);
+    g_array_append_val (entries, entry);
   }
 
-  g_dir_close (dir);
-}
+  gum_linux_unlock_pthread_list (spec);
 
-static void
-gum_store_cpu_context (GumThreadId thread_id,
-                       GumCpuContext * cpu_context,
-                       gpointer user_data)
-{
-  memcpy (user_data, cpu_context, sizeof (GumCpuContext));
+  for (i = 0; i != entries->len; i++)
+  {
+    GumThreadDetails * entry;
+    gchar * name = NULL;
+    gboolean carry_on = TRUE;
+
+    entry = &g_array_index (entries, GumThreadDetails, i);
+
+    if ((flags & GUM_THREAD_FLAGS_NAME) != 0)
+    {
+      name = gum_linux_query_thread_name (entry->id);
+      if (name != NULL)
+      {
+        entry->name = name;
+        entry->flags |= GUM_THREAD_FLAGS_NAME;
+      }
+    }
+
+    if ((flags & GUM_THREAD_FLAGS_STATE) != 0)
+    {
+      if (!gum_linux_query_thread_state (entry->id, &entry->state))
+        goto skip;
+      entry->flags |= GUM_THREAD_FLAGS_STATE;
+    }
+
+    if ((flags & GUM_THREAD_FLAGS_CPU_CONTEXT) != 0)
+    {
+      if (!gum_linux_query_thread_cpu_context (entry->id, &entry->cpu_context))
+        goto skip;
+      entry->flags |= GUM_THREAD_FLAGS_CPU_CONTEXT;
+    }
+
+    carry_on = func (entry, user_data);
+
+skip:
+    g_free (name);
+
+    if (!carry_on)
+      break;
+  }
+
+  g_array_unref (entries);
 }
 
 gboolean
-_gum_process_collect_main_module (const GumModuleDetails * details,
+_gum_process_collect_main_module (GumModule * module,
                                   gpointer user_data)
 {
-  GumModuleDetails ** out = user_data;
+  GumModule ** out = user_data;
 
-  *out = gum_module_details_copy (details);
+  *out = g_object_ref (module);
 
   return FALSE;
 }
 
-void
-_gum_process_enumerate_modules (GumFoundModuleFunc func,
-                                gpointer user_data)
+GumModule *
+gum_process_get_libc_module (void)
 {
-  gum_do_enumerate_modules (gum_process_query_libc_name (), func, user_data);
+  static GOnce once = G_ONCE_INIT;
+
+  g_once (&once, (GThreadFunc) gum_try_init_libc_module, NULL);
+
+  if (once.retval == NULL)
+    gum_panic ("Unable to locate the libc; please file a bug");
+
+  return once.retval;
+}
+
+static GumModule *
+gum_try_init_libc_module (void)
+{
+  gum_libc_module = gum_process_find_module_by_address (
+      GUM_ADDRESS (_gum_process_get_libc_info ()->dli_fbase));
+
+  _gum_register_destructor (gum_deinit_libc_module);
+
+  return gum_libc_module;
 }
 
 static void
-gum_do_enumerate_modules (const gchar * libc_name,
-                          GumFoundModuleFunc func,
-                          gpointer user_data)
+gum_deinit_libc_module (void)
 {
-  const GumProgramModules * pm;
-  static gsize iterate_phdr_value = 0;
-  GumDlIteratePhdrImpl iterate_phdr;
+  g_object_unref (gum_libc_module);
+}
 
-  pm = gum_query_program_modules ();
+const Dl_info *
+_gum_process_get_libc_info (void)
+{
+  static GOnce once = G_ONCE_INIT;
 
-  if (pm->rtld == GUM_PROGRAM_RTLD_NONE)
-  {
-    if (!func (&pm->program, user_data))
-      return;
+  g_once (&once, (GThreadFunc) gum_try_init_libc_info, NULL);
 
-    if (pm->vdso.range->base_address != 0)
-      func (&pm->vdso, user_data);
+  if (once.retval == NULL)
+    gum_panic ("Unable to locate the libc; please file a bug");
 
-    return;
-  }
+  return once.retval;
+}
 
-#if defined (HAVE_ANDROID) && !defined (GUM_DIET)
-  if (gum_android_get_linker_flavor () == GUM_ANDROID_LINKER_NATIVE)
-  {
-    gum_android_enumerate_modules (func, user_data);
-    return;
-  }
+static const Dl_info *
+gum_try_init_libc_info (void)
+{
+#ifndef HAVE_ANDROID
+  if (!gum_try_resolve_dynamic_symbol ("__libc_start_main", &gum_libc_info))
 #endif
-
-  if (g_once_init_enter (&iterate_phdr_value))
   {
-    GumAddress impl;
-
-    impl = gum_module_find_export_by_name (libc_name, "dl_iterate_phdr");
-
-    g_once_init_leave (&iterate_phdr_value, impl + 1);
+    if (!gum_try_resolve_dynamic_symbol ("exit", &gum_libc_info))
+      return NULL;
   }
 
-  iterate_phdr = GSIZE_TO_POINTER (iterate_phdr_value - 1);
-  if (iterate_phdr != NULL)
-  {
-    gum_process_enumerate_modules_by_using_libc (iterate_phdr, func, user_data);
-  }
-  else
-  {
-    gum_linux_enumerate_modules_using_proc_maps (func, user_data);
-  }
-}
-
-static void
-gum_process_enumerate_modules_by_using_libc (GumDlIteratePhdrImpl iterate_phdr,
-                                             GumFoundModuleFunc func,
-                                             gpointer user_data)
-{
-  GumEnumerateModulesContext ctx;
-
-  ctx.func = func;
-  ctx.user_data = user_data;
-
-  ctx.named_ranges = gum_linux_collect_named_ranges ();
-
-  iterate_phdr (gum_emit_module_from_phdr, &ctx);
-
-  g_hash_table_unref (ctx.named_ranges);
-}
-
-static gint
-gum_emit_module_from_phdr (struct dl_phdr_info * info,
-                           gsize size,
-                           gpointer user_data)
-{
-  GumEnumerateModulesContext * ctx = user_data;
-  GumMemoryRange range;
-  GumLinuxNamedRange * named_range;
-  const gchar * path;
-  gchar * name;
-  GumModuleDetails details;
-  gboolean carry_on;
-
-  gum_compute_elf_range_from_phdrs (info->dlpi_phdr, sizeof (ElfW(Phdr)),
-      info->dlpi_phnum, 0, &range);
-
-  named_range = g_hash_table_lookup (ctx->named_ranges,
-      GSIZE_TO_POINTER (range.base_address));
-
-  path = (named_range != NULL) ? named_range->name : info->dlpi_name;
-  name = g_path_get_basename (path);
-
-  details.name = name;
-  details.range = &range;
-  details.path = path;
-
-  carry_on = ctx->func (&details, ctx->user_data);
-
-  g_free (name);
-
-  return carry_on ? 0 : 1;
-}
-
-void
-gum_linux_enumerate_modules_using_proc_maps (GumFoundModuleFunc func,
-                                             gpointer user_data)
-{
-  GumProcMapsIter iter;
-  gchar * path, * next_path;
-  const gchar * line;
-  gboolean carry_on = TRUE;
-  gboolean got_line = FALSE;
-
-  gum_proc_maps_iter_init_for_self (&iter);
-
-  path = g_malloc (PATH_MAX);
-  next_path = g_malloc (PATH_MAX);
-
-  do
-  {
-    const guint8 elf_magic[] = { 0x7f, 'E', 'L', 'F' };
-    GumModuleDetails details;
-    GumMemoryRange range;
-    GumAddress end;
-    gchar perms[5] = { 0, };
-    gint n;
-    gboolean is_vdso, readable, shared;
-    gchar * name;
-
-    if (!got_line)
-    {
-      if (!gum_proc_maps_iter_next (&iter, &line))
-        break;
-    }
-    else
-    {
-      got_line = FALSE;
-    }
-
-    n = sscanf (line,
-        "%" G_GINT64_MODIFIER "x-%" G_GINT64_MODIFIER "x "
-        "%4c "
-        "%*x %*s %*d "
-        "%[^\n]",
-        &range.base_address, &end,
-        perms,
-        path);
-    if (n == 3)
-      continue;
-    g_assert (n == 4);
-
-    is_vdso = gum_try_translate_vdso_name (path);
-
-    readable = perms[0] == 'r';
-    shared = perms[3] == 's';
-    if (!readable || shared)
-      continue;
-    else if ((path[0] != '/' && !is_vdso) || g_str_has_prefix (path, "/dev/"))
-      continue;
-    else if (RUNNING_ON_VALGRIND && strstr (path, "/valgrind/") != NULL)
-      continue;
-    else if (memcmp (GSIZE_TO_POINTER (range.base_address), elf_magic,
-        sizeof (elf_magic)) != 0)
-      continue;
-
-    name = g_path_get_basename (path);
-
-    range.size = end - range.base_address;
-
-    details.name = name;
-    details.range = &range;
-    details.path = path;
-
-    while (gum_proc_maps_iter_next (&iter, &line))
-    {
-      n = sscanf (line,
-          "%*x-%" G_GINT64_MODIFIER "x %*c%*c%*c%*c %*x %*s %*d %[^\n]",
-          &end,
-          next_path);
-      if (n == 1)
-      {
-        continue;
-      }
-      else if (n == 2 && next_path[0] == '[')
-      {
-        if (!gum_try_translate_vdso_name (next_path))
-          continue;
-      }
-
-      if (n == 2 && strcmp (next_path, path) == 0)
-      {
-        range.size = end - range.base_address;
-      }
-      else
-      {
-        got_line = TRUE;
-        break;
-      }
-    }
-
-    carry_on = func (&details, user_data);
-
-    g_free (name);
-  }
-  while (carry_on);
-
-  g_free (path);
-  g_free (next_path);
-
-  gum_proc_maps_iter_destroy (&iter);
+  return &gum_libc_info;
 }
 
 GHashTable *
@@ -1325,7 +1238,7 @@ gum_linux_collect_named_ranges (void)
       continue;
     g_assert (n == 3);
 
-    gum_try_translate_vdso_name (name);
+    _gum_try_translate_vdso_name (name);
 
     size = end - start;
 
@@ -1341,7 +1254,7 @@ gum_linux_collect_named_ranges (void)
       }
       else if (n == 2 && next_name[0] == '[')
       {
-        if (!gum_try_translate_vdso_name (next_name))
+        if (!_gum_try_translate_vdso_name (next_name))
           continue;
       }
 
@@ -1382,8 +1295,8 @@ gum_linux_named_range_free (GumLinuxNamedRange * range)
   g_slice_free (GumLinuxNamedRange, range);
 }
 
-static gboolean
-gum_try_translate_vdso_name (gchar * name)
+gboolean
+_gum_try_translate_vdso_name (gchar * name)
 {
   if (strcmp (name, "[vdso]") == 0)
   {
@@ -1393,6 +1306,203 @@ gum_try_translate_vdso_name (gchar * name)
 
   return FALSE;
 }
+
+#if defined (HAVE_GLIBC)
+
+void
+gum_linux_pthread_iter_init (GumLinuxPThreadIter * iter,
+                             const GumLinuxPThreadSpec * spec)
+{
+  gsize i;
+  GList * used_list = NULL;
+  gboolean walked_used_list = FALSE;
+  GList * user_list = NULL;
+  gboolean walked_user_list = FALSE;
+  gboolean success = FALSE;
+
+  for (i = 0; i != GUM_MAX_LIST_WALK_ATTEMPTS; i++)
+  {
+    if (gum_linux_get_threads_from_list (spec, spec->stack_used, &used_list))
+    {
+      walked_used_list = TRUE;
+      break;
+    }
+  }
+  if (!walked_used_list)
+    goto beach;
+
+  for (i = 0; i != GUM_MAX_LIST_WALK_ATTEMPTS; i++)
+  {
+    if (gum_linux_get_threads_from_list (spec, spec->stack_user, &user_list))
+    {
+      walked_user_list = TRUE;
+      break;
+    }
+  }
+  if (!walked_user_list)
+    goto beach;
+
+  iter->list = g_list_concat (user_list, used_list);
+
+  success = TRUE;
+
+beach:
+  if (!success)
+  {
+    g_list_free (used_list);
+    g_list_free (user_list);
+  }
+}
+
+static gboolean
+gum_linux_get_threads_from_list (const GumLinuxPThreadSpec * spec,
+                                 const GumGlibcList * anchor,
+                                 GList ** threads)
+{
+  gboolean success = FALSE;
+  GList * list = NULL;
+  pthread_t first, current;
+  guint num_threads = 0;
+  pthread_t next, prev;
+
+  first = (pthread_t) ((gpointer) anchor - spec->flink_offset);
+  current = first;
+
+  do
+  {
+    gboolean is_non_anchor_thread;
+
+    if (!gum_linux_thread_read_flink (spec, current, &next))
+      goto beach;
+
+    if (!gum_linux_thread_read_blink (spec, next, &prev))
+      goto beach;
+
+    if (prev != current)
+      goto beach;
+
+    is_non_anchor_thread =
+        current != first &&
+        gum_linux_query_pthread_tid (current, spec) != 0;
+    if (is_non_anchor_thread)
+      list = g_list_prepend (list, GSIZE_TO_POINTER (current));
+
+    current = next;
+    num_threads++;
+
+    /*
+     * If we find more than the maximum expected number of threads without
+     * getting back to the start of the list, then terminate to avoid an
+     * infinite loop.
+     */
+    if (num_threads == GUM_LINUX_MAX_THREADS)
+      goto beach;
+  }
+  while (current != first);
+
+  *threads = list;
+  success = TRUE;
+
+beach:
+  if (!success)
+    g_list_free (list);
+
+  return success;
+}
+
+#else
+
+void
+gum_linux_pthread_iter_init (GumLinuxPThreadIter * iter,
+                             const GumLinuxPThreadSpec * spec)
+{
+  iter->list = NULL;
+  iter->node = NULL;
+  iter->spec = spec;
+}
+
+#endif
+
+#if defined (HAVE_GLIBC)
+
+gboolean
+gum_linux_pthread_iter_next (GumLinuxPThreadIter * self,
+                             pthread_t * thread)
+{
+  GList * first = self->list;
+  if (first == NULL)
+    return FALSE;
+
+  *thread = (pthread_t) (first->data);
+  self->list = g_list_next (self->list);
+  g_list_free_1 (first);
+
+  return TRUE;
+}
+
+#elif defined (HAVE_MUSL)
+
+gboolean
+gum_linux_pthread_iter_next (GumLinuxPThreadIter * self,
+                             pthread_t * thread)
+{
+  GumLinuxPThread * list = self->list;
+  GumLinuxPThread * node = self->node;
+
+  if (list == NULL)
+  {
+    list = self->spec->main_thread;
+    self->list = list;
+
+    node = list;
+  }
+  else
+  {
+    node = node->next;
+    if (node == list)
+      return FALSE;
+  }
+  self->node = node;
+
+  *thread = (pthread_t) node;
+  return TRUE;
+}
+
+#elif defined (HAVE_ANDROID)
+
+gboolean
+gum_linux_pthread_iter_next (GumLinuxPThreadIter * self,
+                             pthread_t * thread)
+{
+  GumLinuxPThread * list = self->list;
+  GumLinuxPThread * node = self->node;
+
+  if (list == NULL)
+  {
+    GumLinuxPThread * tail, * cur;
+
+    tail = NULL;
+    for (cur = *self->spec->thread_list; cur != NULL; cur = cur->next)
+      tail = cur;
+
+    list = tail;
+    self->list = list;
+
+    node = list;
+  }
+  else
+  {
+    node = node->prev;
+  }
+  if (node == NULL)
+    return FALSE;
+  self->node = node;
+
+  *thread = GPOINTER_TO_SIZE (node);
+  return TRUE;
+}
+
+#endif
 
 void
 _gum_process_enumerate_ranges (GumPageProtection prot,
@@ -1467,6 +1577,128 @@ gum_process_enumerate_malloc_ranges (GumFoundMallocRangeFunc func,
                                      gpointer user_data)
 {
   /* Not implemented */
+}
+
+gchar *
+gum_linux_query_thread_name (GumThreadId id)
+{
+  gchar * name = NULL;
+  gchar * path;
+  gchar * comm = NULL;
+
+  path = g_strdup_printf ("/proc/self/task/%" G_GSIZE_FORMAT "/comm", id);
+  if (!g_file_get_contents (path, &comm, NULL, NULL))
+    goto beach;
+  name = g_strchomp (g_steal_pointer (&comm));
+
+beach:
+  g_free (comm);
+  g_free (path);
+
+  return name;
+}
+
+gboolean
+gum_linux_query_thread_state (GumThreadId tid,
+                              GumThreadState * state)
+{
+  gboolean success = FALSE;
+  gchar * path, * info = NULL;
+
+  path = g_strdup_printf ("/proc/self/task/%" G_GSIZE_FORMAT "/stat", tid);
+  if (g_file_get_contents (path, &info, NULL, NULL))
+  {
+    gchar * p;
+
+    p = strrchr (info, ')') + 2;
+
+    *state = gum_thread_state_from_proc_status_character (*p);
+    success = TRUE;
+  }
+
+  g_free (info);
+  g_free (path);
+
+  return success;
+}
+
+static GumThreadState
+gum_thread_state_from_proc_status_character (gchar c)
+{
+  switch (g_ascii_toupper (c))
+  {
+    case 'R': return GUM_THREAD_RUNNING;
+    case 'S': return GUM_THREAD_WAITING;
+    case 'D': return GUM_THREAD_UNINTERRUPTIBLE;
+    case 'Z': return GUM_THREAD_UNINTERRUPTIBLE;
+    case 'T': return GUM_THREAD_STOPPED;
+    case 'W':
+    default:
+      return GUM_THREAD_UNINTERRUPTIBLE;
+  }
+}
+
+gboolean
+gum_linux_query_thread_cpu_context (GumThreadId tid,
+                                    GumCpuContext * ctx)
+{
+  return gum_process_modify_thread (tid, gum_store_cpu_context, ctx,
+      GUM_MODIFY_THREAD_FLAGS_ABORT_SAFELY);
+}
+
+static void
+gum_store_cpu_context (GumThreadId thread_id,
+                       GumCpuContext * cpu_context,
+                       gpointer user_data)
+{
+  memcpy (user_data, cpu_context, sizeof (GumCpuContext));
+}
+
+#ifdef HAVE_GLIBC
+GumThreadId
+gum_linux_query_pthread_tid (pthread_t thread,
+                             const GumLinuxPThreadSpec * spec)
+{
+  gint * tid = GSIZE_TO_POINTER (thread) + spec->tid_offset;
+  return *tid;
+}
+#else
+GumThreadId
+gum_linux_query_pthread_tid (pthread_t thread,
+                             const GumLinuxPThreadSpec * spec)
+{
+  GumLinuxPThread * pth = GSIZE_TO_POINTER (thread);
+
+  return pth->tid;
+}
+#endif
+
+gpointer
+gum_linux_query_pthread_start_routine (pthread_t thread,
+                                       const GumLinuxPThreadSpec * spec)
+{
+#ifdef HAVE_MUSL
+  GumMuslStartArgs * args = gum_query_pthread_start_args (thread, spec);
+  if (args == NULL)
+    return NULL;
+  return args->start_func;
+#else
+  return *((gpointer *) ((guint8 *) thread + spec->start_routine_offset));
+#endif
+}
+
+gpointer
+gum_linux_query_pthread_start_parameter (pthread_t thread,
+                                         const GumLinuxPThreadSpec * spec)
+{
+#ifdef HAVE_MUSL
+  GumMuslStartArgs * args = gum_query_pthread_start_args (thread, spec);
+  if (args == NULL)
+    return NULL;
+  return args->start_arg;
+#else
+  return *((gpointer *) ((guint8 *) thread + spec->start_parameter_offset));
+#endif
 }
 
 guint
@@ -1549,144 +1781,193 @@ failure:
 }
 
 gboolean
-gum_module_load (const gchar * module_name,
-                 GError ** error)
+gum_thread_set_hardware_breakpoint (GumThreadId thread_id,
+                                    guint breakpoint_id,
+                                    GumAddress address,
+                                    GError ** error)
 {
-  GumGenericDlopenImpl dlopen_impl = dlopen;
+  GumSetHardwareBreakpointContext bpc;
 
-#if defined (HAVE_ANDROID) && !defined (GUM_DIET)
-  if (gum_module_get_handle (module_name) != NULL)
-    return TRUE;
+  bpc.breakpoint_id = breakpoint_id;
+  bpc.address = address;
 
-  if (gum_android_get_linker_flavor () == GUM_ANDROID_LINKER_NATIVE)
-    gum_android_find_unrestricted_dlopen (&dlopen_impl);
-#endif
-
-  if (dlopen_impl (module_name, RTLD_LAZY) == NULL)
-    goto not_found;
-
-  return TRUE;
-
-not_found:
-  {
-    g_set_error (error, GUM_ERROR, GUM_ERROR_NOT_FOUND, "%s", dlerror ());
-    return FALSE;
-  }
+  return gum_linux_modify_thread (thread_id, GUM_REGS_DEBUG_BREAK,
+      gum_do_set_hardware_breakpoint, &bpc, error);
 }
 
-static void *
-gum_module_get_handle (const gchar * module_name)
+static void
+gum_do_set_hardware_breakpoint (GumThreadId thread_id,
+                                GumRegs * regs,
+                                gpointer user_data)
 {
-#if defined (HAVE_MUSL)
-  struct link_map * cur;
+  GumDebugRegs * dr = &regs->debug;
+  GumSetHardwareBreakpointContext * bpc = user_data;
 
-  for (cur = dlopen (NULL, 0); cur != NULL; cur = cur->l_next)
-  {
-    if (gum_linux_module_path_matches (cur->l_name, module_name))
-      return cur;
-  }
-
-  for (cur = dlopen (NULL, 0); cur != NULL; cur = cur->l_next)
-  {
-    gchar * target, * parent_dir, * canonical_path;
-    gboolean is_match;
-
-    target = g_file_read_link (cur->l_name, NULL);
-    if (target == NULL)
-      continue;
-    parent_dir = g_path_get_dirname (cur->l_name);
-    canonical_path = g_canonicalize_filename (target, parent_dir);
-
-    is_match = gum_linux_module_path_matches (canonical_path, module_name);
-
-    g_free (canonical_path);
-    g_free (parent_dir);
-    g_free (target);
-
-    if (is_match)
-      return cur;
-  }
-
-  return NULL;
-#else
-# if defined (HAVE_ANDROID) && !defined (GUM_DIET)
-  if (gum_android_get_linker_flavor () == GUM_ANDROID_LINKER_NATIVE)
-    return gum_android_get_module_handle (module_name);
-# endif
-
-  return dlopen (module_name, RTLD_LAZY | RTLD_NOLOAD);
+#if defined (HAVE_I386)
+  _gum_x86_set_breakpoint (&dr->dr7, &dr->dr0, bpc->breakpoint_id,
+      bpc->address);
+#elif defined (HAVE_ARM)
+  _gum_arm_set_breakpoint (dr->cr, dr->vr, bpc->breakpoint_id, bpc->address);
+#elif defined (HAVE_ARM64)
+  _gum_arm64_set_breakpoint (dr->cr, dr->vr, bpc->breakpoint_id, bpc->address);
+#elif defined (HAVE_MIPS) && GLIB_SIZEOF_VOID_P == 4
+  g_assert (dr->style == GUM_MIPS_WATCH_MIPS32);
+  _gum_mips_set_breakpoint (dr->mips32.watch_lo, dr->mips32.watch_hi,
+      bpc->breakpoint_id, bpc->address);
+#elif defined (HAVE_MIPS) && GLIB_SIZEOF_VOID_P == 8
+  g_assert (dr->style == GUM_MIPS_WATCH_MIPS64);
+  _gum_mips_set_breakpoint (dr->mips64.watch_lo, dr->mips64.watch_hi,
+      bpc->breakpoint_id, bpc->address);
 #endif
-}
-
-static void *
-gum_module_get_symbol (void * module,
-                       const gchar * symbol)
-{
-  GumGenericDlsymImpl dlsym_impl = dlsym;
-
-#if defined (HAVE_ANDROID) && !defined (GUM_DIET)
-  if (gum_android_get_linker_flavor () == GUM_ANDROID_LINKER_NATIVE)
-    gum_android_find_unrestricted_dlsym (&dlsym_impl);
-#endif
-
-  return dlsym_impl (module, symbol);
 }
 
 gboolean
-gum_module_ensure_initialized (const gchar * module_name)
+gum_thread_unset_hardware_breakpoint (GumThreadId thread_id,
+                                      guint breakpoint_id,
+                                      GError ** error)
 {
-  void * module;
-
-#if defined (HAVE_ANDROID) && !defined (GUM_DIET)
-  if (gum_android_get_linker_flavor () == GUM_ANDROID_LINKER_NATIVE)
-    return gum_android_ensure_module_initialized (module_name);
-#endif
-
-  module = gum_module_get_handle (module_name);
-  if (module == NULL)
-    return FALSE;
-  dlclose (module);
-
-#ifndef HAVE_MUSL
-  module = dlopen (module_name, RTLD_LAZY);
-  if (module == NULL)
-    return FALSE;
-  dlclose (module);
-#endif
-
-  return TRUE;
+  return gum_linux_modify_thread (thread_id, GUM_REGS_DEBUG_BREAK,
+      gum_do_unset_hardware_breakpoint, GUINT_TO_POINTER (breakpoint_id),
+      error);
 }
 
-GumAddress
-gum_module_find_export_by_name (const gchar * module_name,
-                                const gchar * symbol_name)
+static void
+gum_do_unset_hardware_breakpoint (GumThreadId thread_id,
+                                  GumRegs * regs,
+                                  gpointer user_data)
 {
-  GumAddress result;
-  void * module;
+  GumDebugRegs * dr = &regs->debug;
+  guint breakpoint_id = GPOINTER_TO_UINT (user_data);
 
-#if defined (HAVE_ANDROID) && !defined (GUM_DIET)
-  if (gum_android_get_linker_flavor () == GUM_ANDROID_LINKER_NATIVE &&
-      gum_android_try_resolve_magic_export (module_name, symbol_name, &result))
-    return result;
+#if defined (HAVE_I386)
+  _gum_x86_unset_breakpoint (&dr->dr7, &dr->dr0, breakpoint_id);
+#elif defined (HAVE_ARM)
+  _gum_arm_unset_breakpoint (dr->cr, dr->vr, breakpoint_id);
+#elif defined (HAVE_ARM64)
+  _gum_arm64_unset_breakpoint (dr->cr, dr->vr, breakpoint_id);
+#elif defined (HAVE_MIPS) && GLIB_SIZEOF_VOID_P == 4
+  g_assert (dr->style == GUM_MIPS_WATCH_MIPS32);
+  _gum_mips_unset_breakpoint (dr->mips32.watch_lo, dr->mips32.watch_hi,
+      breakpoint_id);
+#elif defined (HAVE_MIPS) && GLIB_SIZEOF_VOID_P == 8
+  g_assert (dr->style == GUM_MIPS_WATCH_MIPS64);
+  _gum_mips_unset_breakpoint (dr->mips64.watch_lo, dr->mips64.watch_hi,
+      breakpoint_id);
 #endif
+}
 
-  if (module_name != NULL)
+gboolean
+gum_thread_set_hardware_watchpoint (GumThreadId thread_id,
+                                    guint watchpoint_id,
+                                    GumAddress address,
+                                    gsize size,
+                                    GumWatchConditions wc,
+                                    GError ** error)
+{
+  GumSetHardwareWatchpointContext wpc;
+
+  wpc.watchpoint_id = watchpoint_id;
+  wpc.address = address;
+  wpc.size = size;
+  wpc.conditions = wc;
+
+  return gum_linux_modify_thread (thread_id, GUM_REGS_DEBUG_WATCH,
+      gum_do_set_hardware_watchpoint, &wpc, error);
+}
+
+static void
+gum_do_set_hardware_watchpoint (GumThreadId thread_id,
+                                GumRegs * regs,
+                                gpointer user_data)
+{
+  GumDebugRegs * dr = &regs->debug;
+  GumSetHardwareWatchpointContext * wpc = user_data;
+
+#if defined (HAVE_I386)
+  _gum_x86_set_watchpoint (&dr->dr7, &dr->dr0, wpc->watchpoint_id, wpc->address,
+      wpc->size, wpc->conditions);
+#elif defined (HAVE_ARM)
+  _gum_arm_set_watchpoint (dr->cr, dr->vr, wpc->watchpoint_id, wpc->address,
+      wpc->size, wpc->conditions);
+#elif defined (HAVE_ARM64)
+  _gum_arm64_set_watchpoint (dr->cr, dr->vr, wpc->watchpoint_id, wpc->address,
+      wpc->size, wpc->conditions);
+#elif defined (HAVE_MIPS) && GLIB_SIZEOF_VOID_P == 4
+  g_assert (dr->style == GUM_MIPS_WATCH_MIPS32);
+  _gum_mips_set_watchpoint (dr->mips32.watch_lo, dr->mips32.watch_hi,
+      wpc->watchpoint_id, wpc->address, wpc->size, wpc->conditions);
+#elif defined (HAVE_MIPS) && GLIB_SIZEOF_VOID_P == 8
+  g_assert (dr->style == GUM_MIPS_WATCH_MIPS64);
+  _gum_mips_set_watchpoint (dr->mips64.watch_lo, dr->mips64.watch_hi,
+      wpc->watchpoint_id, wpc->address, wpc->size, wpc->conditions);
+#endif
+}
+
+gboolean
+gum_thread_unset_hardware_watchpoint (GumThreadId thread_id,
+                                      guint watchpoint_id,
+                                      GError ** error)
+{
+  return gum_linux_modify_thread (thread_id, GUM_REGS_DEBUG_WATCH,
+      gum_do_unset_hardware_watchpoint, GUINT_TO_POINTER (watchpoint_id),
+      error);
+}
+
+static void
+gum_do_unset_hardware_watchpoint (GumThreadId thread_id,
+                                  GumRegs * regs,
+                                  gpointer user_data)
+{
+  GumDebugRegs * dr = &regs->debug;
+  guint watchpoint_id = GPOINTER_TO_UINT (user_data);
+
+#if defined (HAVE_I386)
+  _gum_x86_unset_watchpoint (&dr->dr7, &dr->dr0, watchpoint_id);
+#elif defined (HAVE_ARM)
+  _gum_arm_unset_watchpoint (dr->cr, dr->vr, watchpoint_id);
+#elif defined (HAVE_ARM64)
+  _gum_arm64_unset_watchpoint (dr->cr, dr->vr, watchpoint_id);
+#elif defined (HAVE_MIPS) && GLIB_SIZEOF_VOID_P == 4
+  g_assert (dr->style == GUM_MIPS_WATCH_MIPS32);
+  _gum_mips_unset_watchpoint (dr->mips32.watch_lo, dr->mips32.watch_hi,
+      watchpoint_id);
+#elif defined (HAVE_MIPS) && GLIB_SIZEOF_VOID_P == 8
+  g_assert (dr->style == GUM_MIPS_WATCH_MIPS64);
+  _gum_mips_unset_watchpoint (dr->mips64.watch_lo, dr->mips64.watch_hi,
+      watchpoint_id);
+#endif
+}
+
+gboolean
+gum_linux_check_kernel_version (guint major,
+                                guint minor,
+                                guint micro)
+{
+  static gboolean initialized = FALSE;
+  static guint kern_major = G_MAXUINT;
+  static guint kern_minor = G_MAXUINT;
+  static guint kern_micro = G_MAXUINT;
+
+  if (!initialized)
   {
-    module = gum_module_get_handle (module_name);
-    if (module == NULL)
-      return 0;
+    struct utsname un;
+    G_GNUC_UNUSED int res;
+
+    res = uname (&un);
+    g_assert (res == 0);
+
+    sscanf (un.release, "%u.%u.%u", &kern_major, &kern_minor, &kern_micro);
+
+    initialized = TRUE;
   }
-  else
-  {
-    module = RTLD_DEFAULT;
-  }
 
-  result = GUM_ADDRESS (gum_module_get_symbol (module, symbol_name));
+  if (kern_major > major)
+    return TRUE;
 
-  if (module != RTLD_DEFAULT)
-    dlclose (module);
+  if (kern_major == major && kern_minor > minor)
+    return TRUE;
 
-  return result;
+  return kern_major == major && kern_minor == minor && kern_micro >= micro;
 }
 
 GumCpuType
@@ -1849,6 +2130,17 @@ gum_linux_cpu_type_from_auxv (gconstpointer auxv,
   GumCpuType cpu32, cpu64;
   gsize i;
 
+  /*
+   * If we are building for ILP32, then the logic below doesn't work since
+   * although our target process is 64-bit, the address space is constrained
+   * to 32-bits. Thus, none of the high bits will be set. On this platform,
+   * however, we only support ILP32 processes and so we can assume that they
+   * are all 64-bit.
+   */
+#if defined (HAVE_ARM64) && !(defined (__LP64__) || defined (_WIN64))
+  return GUM_CPU_ARM64;
+#endif
+
 #if defined (HAVE_I386)
   cpu32 = GUM_CPU_IA32;
   cpu64 = GUM_CPU_AMD64;
@@ -1918,95 +2210,6 @@ gum_linux_cpu_type_from_auxv (gconstpointer auxv,
   }
 
   return result;
-}
-
-gboolean
-_gum_process_resolve_module_name (const gchar * name,
-                                  gchar ** path,
-                                  GumAddress * base)
-{
-  return gum_do_resolve_module_name (name, gum_process_query_libc_name (), path,
-      base);
-}
-
-static gboolean
-gum_do_resolve_module_name (const gchar * name,
-                            const gchar * libc_name,
-                            gchar ** path,
-                            GumAddress * base)
-{
-  gboolean success = FALSE;
-  GumResolveModuleNameContext ctx;
-
-  if (name[0] == '/' && base == NULL)
-  {
-    success = TRUE;
-
-    if (path != NULL)
-      *path = g_strdup (name);
-
-    goto beach;
-  }
-
-  ctx.name = name;
-  ctx.known_address = 0;
-#if defined (HAVE_GLIBC) || defined (HAVE_MUSL)
-  {
-    struct link_map * map = dlopen (name, RTLD_LAZY | RTLD_NOLOAD);
-    if (map != NULL)
-    {
-      ctx.known_address = GUM_ADDRESS (map->l_ld);
-      dlclose (map);
-    }
-  }
-#endif
-  ctx.path = NULL;
-  ctx.base = 0;
-
-  if (name == libc_name &&
-      gum_query_program_modules ()->rtld == GUM_PROGRAM_RTLD_NONE)
-  {
-    gum_linux_enumerate_modules_using_proc_maps (
-        gum_store_module_path_and_base_if_match, &ctx);
-  }
-  else
-  {
-    gum_do_enumerate_modules (libc_name,
-        gum_store_module_path_and_base_if_match, &ctx);
-  }
-
-  success = ctx.path != NULL;
-
-  if (path != NULL)
-    *path = g_steal_pointer (&ctx.path);
-
-  if (base != NULL)
-    *base = ctx.base;
-
-  g_free (ctx.path);
-
-beach:
-  return success;
-}
-
-static gboolean
-gum_store_module_path_and_base_if_match (
-    const GumModuleDetails * details,
-    gpointer user_data)
-{
-  GumResolveModuleNameContext * ctx = user_data;
-  gboolean is_match;
-
-  if (ctx->known_address != 0)
-    is_match = GUM_MEMORY_RANGE_INCLUDES (details->range, ctx->known_address);
-  else
-    is_match = gum_linux_module_path_matches (details->path, ctx->name);
-  if (!is_match)
-    return TRUE;
-
-  ctx->path = g_strdup (details->path);
-  ctx->base = details->range->base_address;
-  return FALSE;
 }
 
 gboolean
@@ -2121,8 +2324,8 @@ gum_proc_maps_iter_next (GumProcMapsIter * iter,
   return TRUE;
 }
 
-static void
-gum_acquire_dumpability (void)
+void
+_gum_acquire_dumpability (void)
 {
   G_LOCK (gum_dumpable);
 
@@ -2141,8 +2344,8 @@ gum_acquire_dumpability (void)
   G_UNLOCK (gum_dumpable);
 }
 
-static void
-gum_release_dumpability (void)
+void
+_gum_release_dumpability (void)
 {
   G_LOCK (gum_dumpable);
 
@@ -2453,8 +2656,8 @@ gum_linux_unparse_ucontext (const GumCpuContext * ctx,
 }
 
 static void
-gum_parse_regs (const GumRegs * regs,
-                GumCpuContext * ctx)
+gum_parse_gp_regs (const GumGPRegs * regs,
+                   GumCpuContext * ctx)
 {
 #if defined (HAVE_I386) && GLIB_SIZEOF_VOID_P == 4
   ctx->eip = regs->eip;
@@ -2569,8 +2772,8 @@ gum_parse_regs (const GumRegs * regs,
 }
 
 static void
-gum_unparse_regs (const GumCpuContext * ctx,
-                  GumRegs * regs)
+gum_unparse_gp_regs (const GumCpuContext * ctx,
+                     GumGPRegs * regs)
 {
 #if defined (HAVE_I386) && GLIB_SIZEOF_VOID_P == 4
   regs->eip = ctx->eip;
@@ -2679,66 +2882,6 @@ gum_unparse_regs (const GumCpuContext * ctx,
 #endif
 }
 
-static gchar *
-gum_thread_read_name (GumThreadId thread_id)
-{
-  gchar * name = NULL;
-  gchar * path;
-  gchar * comm = NULL;
-
-  path = g_strdup_printf ("/proc/self/task/%" G_GSIZE_FORMAT "/comm",
-      thread_id);
-  if (!g_file_get_contents (path, &comm, NULL, NULL))
-    goto beach;
-  name = g_strchomp (g_steal_pointer (&comm));
-
-beach:
-  g_free (comm);
-  g_free (path);
-
-  return name;
-}
-
-static gboolean
-gum_thread_read_state (GumThreadId tid,
-                       GumThreadState * state)
-{
-  gboolean success = FALSE;
-  gchar * path, * info = NULL;
-
-  path = g_strdup_printf ("/proc/self/task/%" G_GSIZE_FORMAT "/stat", tid);
-  if (g_file_get_contents (path, &info, NULL, NULL))
-  {
-    gchar * p;
-
-    p = strrchr (info, ')') + 2;
-
-    *state = gum_thread_state_from_proc_status_character (*p);
-    success = TRUE;
-  }
-
-  g_free (info);
-  g_free (path);
-
-  return success;
-}
-
-static GumThreadState
-gum_thread_state_from_proc_status_character (gchar c)
-{
-  switch (g_ascii_toupper (c))
-  {
-    case 'R': return GUM_THREAD_RUNNING;
-    case 'S': return GUM_THREAD_WAITING;
-    case 'D': return GUM_THREAD_UNINTERRUPTIBLE;
-    case 'Z': return GUM_THREAD_UNINTERRUPTIBLE;
-    case 'T': return GUM_THREAD_STOPPED;
-    case 'W':
-    default:
-      return GUM_THREAD_UNINTERRUPTIBLE;
-  }
-}
-
 static GumPageProtection
 gum_page_protection_from_proc_perms_string (const gchar * perms)
 {
@@ -2756,49 +2899,1637 @@ gum_page_protection_from_proc_perms_string (const gchar * perms)
 
 static gssize
 gum_get_regs (pid_t pid,
-              GumRegs * regs)
+              guint type,
+              gpointer data,
+              gsize * size)
 {
   if (gum_is_regset_supported)
   {
     struct iovec io = {
-      .iov_base = regs,
-      .iov_len = sizeof (GumRegs)
+      .iov_base = data,
+      .iov_len = *size
     };
     gssize ret = gum_libc_ptrace (PTRACE_GETREGSET, pid,
-        GSIZE_TO_POINTER (NT_PRSTATUS), &io);
+        GUINT_TO_POINTER (type), &io);
     if (ret >= 0)
+    {
+      *size = io.iov_len;
       return ret;
-    else if (ret == -EPERM || ret == -ESRCH)
+    }
+    if (ret == -EPERM || ret == -ESRCH)
       return ret;
-    else
-      gum_is_regset_supported = FALSE;
+    gum_is_regset_supported = FALSE;
   }
 
-  return gum_libc_ptrace (PTRACE_GETREGS, pid, NULL, regs);
+  return gum_libc_ptrace (PTRACE_GETREGS, pid, NULL, data);
 }
 
 static gssize
 gum_set_regs (pid_t pid,
-              const GumRegs * regs)
+              guint type,
+              gconstpointer data,
+              gsize size)
 {
   if (gum_is_regset_supported)
   {
     struct iovec io = {
-      .iov_base = (void *) regs,
-      .iov_len = sizeof (GumRegs)
+      .iov_base = (void *) data,
+      .iov_len = size
     };
     gssize ret = gum_libc_ptrace (PTRACE_SETREGSET, pid,
-        GSIZE_TO_POINTER (NT_PRSTATUS), &io);
+        GUINT_TO_POINTER (type), &io);
     if (ret >= 0)
       return ret;
-    else if (ret == -EPERM || ret == -ESRCH)
+    if (ret == -EPERM || ret == -ESRCH)
       return ret;
-    else
-      gum_is_regset_supported = FALSE;
+    gum_is_regset_supported = FALSE;
   }
 
-  return gum_libc_ptrace (PTRACE_SETREGS, pid, NULL, (gpointer) regs);
+  return gum_libc_ptrace (PTRACE_SETREGS, pid, NULL, (gpointer) data);
 }
+
+const GumLinuxPThreadSpec *
+gum_linux_query_pthread_spec (void)
+{
+  static GumLinuxPThreadSpec spec;
+  static gsize initialized = FALSE;
+
+  if (g_once_init_enter (&initialized))
+  {
+    GumModule * libc;
+
+    libc = gum_process_get_libc_module ();
+    spec.set_name = GSIZE_TO_POINTER (gum_module_find_export_by_name (libc,
+          "pthread_setname_np"));
+
+    if (!gum_detect_pthread_internals (&spec))
+      g_error ("Unsupported Linux system; please file a bug");
+
+    g_once_init_leave (&initialized, TRUE);
+  }
+
+  return &spec;
+}
+
+#if defined (HAVE_GLIBC)
+
+void
+gum_linux_lock_pthread_list (const GumLinuxPThreadSpec * spec)
+{
+  if (spec->stack_lock != NULL)
+    glibc_lock_acquire (spec->stack_lock);
+}
+
+void
+gum_linux_unlock_pthread_list (const GumLinuxPThreadSpec * spec)
+{
+  if (spec->stack_lock != NULL)
+    glibc_lock_release (spec->stack_lock);
+}
+
+static gboolean
+gum_detect_pthread_internals (GumLinuxPThreadSpec * spec)
+{
+  guint tries;
+  gboolean found_list_head = FALSE;
+  gboolean found_custom_stack_list_anchor = FALSE;
+  gboolean found_default_stack_list_anchor = FALSE;
+
+  /*
+   * We create two threads in quick succession in the hopes that they will be
+   * placed adjacent to each other in the thread list. There is a chance that
+   * the application may create a thread of its own during the interval and
+   * hence a race condition. Therefore we will retry a few times to find the
+   * list head.
+   */
+  for (tries = 0; tries != GUM_MAX_FIND_LIST_HEAD_ATTEMPTS; tries++)
+  {
+    if (gum_linux_find_list_head (spec))
+    {
+      found_list_head = TRUE;
+      break;
+    }
+  }
+  if (!found_list_head)
+    return FALSE;
+
+  if (!gum_linux_find_start_offsets (spec))
+    return FALSE;
+
+  if (!gum_linux_find_tid_offset (spec))
+    return FALSE;
+
+  for (tries = 0; tries != GUM_MAX_FIND_LIST_ANCHOR_ATTEMPTS; tries++)
+  {
+    if (gum_linux_find_list_anchor (spec, TRUE))
+    {
+      found_custom_stack_list_anchor = TRUE;
+      break;
+    }
+  }
+  if (!found_custom_stack_list_anchor)
+    return FALSE;
+
+  for (tries = 0; tries != GUM_MAX_FIND_LIST_ANCHOR_ATTEMPTS; tries++)
+  {
+    if (gum_linux_find_list_anchor (spec, FALSE))
+    {
+      found_default_stack_list_anchor = TRUE;
+      break;
+    }
+  }
+  if (!found_default_stack_list_anchor)
+    return FALSE;
+
+  if (!gum_linux_find_lock (spec))
+    return FALSE;
+
+  if (!gum_linux_find_start_impl (spec))
+    return FALSE;
+
+  spec->terminate_impl = GSIZE_TO_POINTER (gum_module_find_export_by_name (
+      gum_process_get_libc_module (), "__call_tls_dtors"));
+  if (spec->terminate_impl == NULL)
+    return FALSE;
+
+  return TRUE;
+}
+
+static gboolean
+gum_linux_find_list_head (GumLinuxPThreadSpec * spec)
+{
+  gboolean success = FALSE;
+  GumLinuxThreadCtx first, second;
+  gboolean created_first = FALSE;
+  gboolean created_second = FALSE;
+
+  created_first = gum_linux_create_thread (&first, TRUE);
+  if (!created_first)
+    goto beach;
+
+  created_second = gum_linux_create_thread (&second, TRUE);
+  if (!created_second)
+    goto beach;
+
+  if (!gum_linux_find_list_head_offset (spec, &first, &second))
+    goto beach;
+
+  success = TRUE;
+
+beach:
+  if (created_second)
+  {
+    if (!gum_linux_dispose_thread (&second))
+      success = FALSE;
+  }
+
+  if (created_first)
+  {
+    if (!gum_linux_dispose_thread (&first))
+      success = FALSE;
+  }
+
+  return success;
+}
+
+static gboolean
+gum_linux_find_list_head_offset (GumLinuxPThreadSpec * spec,
+                                 GumLinuxThreadCtx * first,
+                                 GumLinuxThreadCtx * second)
+{
+  gboolean success = FALSE;
+  gboolean found_flink = FALSE;
+  gsize offset;
+  gpointer * candidate_address, expected_value;
+  guint8 * candidate_data;
+  gsize bytes_read;
+
+  /*
+   * Threads are added to the list head. So the second thread's flink, should
+   * point to the first thread's list head.
+   */
+  for (offset = 0; offset < GUM_MAX_PTHREAD_SIZE; offset += sizeof (gpointer))
+  {
+    candidate_address = GSIZE_TO_POINTER (second->thread) + offset;
+    expected_value = GSIZE_TO_POINTER (first->thread) + offset;
+
+    candidate_data = gum_memory_read (candidate_address, sizeof (gpointer),
+        &bytes_read);
+    if (candidate_data == NULL || bytes_read != sizeof (gpointer))
+      goto beach;
+
+    found_flink = *(gpointer *) candidate_data == expected_value;
+
+    g_free (candidate_data);
+    candidate_data = NULL;
+
+    if (found_flink)
+    {
+      spec->flink_offset = offset;
+      break;
+    }
+  }
+  if (!found_flink)
+    goto beach;
+
+  /*
+   * The first thread's blink, should point to the second thread's list head.
+   * And the blink should immediately follow the flink.
+   */
+  candidate_address = GSIZE_TO_POINTER (first->thread) + spec->flink_offset +
+      sizeof (gpointer);
+
+  expected_value = GSIZE_TO_POINTER (second->thread) + spec->flink_offset;
+
+  candidate_data = gum_memory_read (candidate_address, sizeof (gpointer),
+      &bytes_read);
+  if (candidate_data == NULL || bytes_read != sizeof (gpointer))
+    goto beach;
+
+  if (*(gpointer **) candidate_data == expected_value)
+  {
+    success = TRUE;
+    spec->blink_offset = spec->flink_offset + sizeof (gpointer);
+  }
+
+beach:
+  g_free (candidate_data);
+
+  return success;
+}
+
+static gboolean
+gum_linux_find_start_offsets (GumLinuxPThreadSpec * spec)
+{
+  gboolean success = FALSE;
+  gboolean created_thread;
+  GumLinuxThreadCtx ctx;
+  gsize offset;
+  gboolean found_start_routine = FALSE;
+  gboolean found_start_param = FALSE;
+
+  created_thread = gum_linux_create_thread (&ctx, TRUE);
+  if (!created_thread)
+    goto beach;
+
+  for (offset = 0; offset < GUM_MAX_PTHREAD_SIZE; offset += sizeof (gpointer))
+  {
+    gpointer * candidate_address;
+    guint8 * candidate_data;
+    gsize bytes_read;
+    gpointer value;
+
+    candidate_address = GSIZE_TO_POINTER (ctx.thread) + offset;
+
+    candidate_data = gum_memory_read (candidate_address, sizeof (gpointer),
+        &bytes_read);
+    if (candidate_data == NULL || bytes_read != sizeof (gpointer))
+      goto beach;
+
+    value = *((gpointer *) candidate_data);
+
+    g_free (candidate_data);
+
+    if (value == gum_linux_thread_proc)
+    {
+      found_start_routine = TRUE;
+      spec->start_routine_offset = offset;
+    }
+
+    if (value == &ctx)
+    {
+      found_start_param = TRUE;
+      spec->start_parameter_offset = offset;
+    }
+
+    if (found_start_routine && found_start_param)
+      break;
+  }
+
+  if (!found_start_routine || !found_start_param)
+    goto beach;
+
+  success = TRUE;
+
+beach:
+  if (created_thread)
+  {
+    if (!gum_linux_dispose_thread (&ctx))
+      success = FALSE;
+  }
+
+  return success;
+}
+
+static gboolean
+gum_linux_find_tid_offset (GumLinuxPThreadSpec * spec)
+{
+  gboolean success = FALSE;
+  gboolean created_thread;
+  GumLinuxThreadCtx ctx;
+  gsize offset;
+  guint matches = 0;
+  gboolean found_tid_offset = FALSE;
+
+  created_thread = gum_linux_create_thread (&ctx, TRUE);
+  if (!created_thread)
+    goto beach;
+
+  for (offset = 0; offset < GUM_MAX_PTHREAD_SIZE; offset += sizeof (gint))
+  {
+    gpointer * candidate_address;
+    guint8 * candidate_data;
+    gsize bytes_read;
+    gint value;
+
+    candidate_address = GSIZE_TO_POINTER (ctx.thread) + offset;
+
+    candidate_data = gum_memory_read (candidate_address, sizeof (gint),
+        &bytes_read);
+    if (candidate_data == NULL || bytes_read != sizeof (gint))
+      goto beach;
+
+    value = *((gint *) candidate_data);
+
+    g_free (candidate_data);
+
+    if (value == ctx.tid)
+    {
+      gsize i;
+
+      /*
+       * The TID is quite small, so there is the chance of a false positive,
+       * create some more threads and check it is right.
+       */
+      for (i = 0; i != GUM_TID_CHECK_TIMES; i++)
+      {
+        gboolean match;
+
+        if (!gum_linux_check_thread_offset (offset, &match))
+          goto beach;
+
+        if (!match)
+          break;
+
+        matches++;
+      }
+
+      if (matches == GUM_TID_CHECK_TIMES)
+      {
+        found_tid_offset = TRUE;
+        spec->tid_offset = offset;
+        break;
+      }
+    }
+  }
+
+  if (!found_tid_offset)
+    goto beach;
+
+  success = TRUE;
+
+beach:
+  if (created_thread)
+  {
+    if (!gum_linux_dispose_thread (&ctx))
+      success = FALSE;
+  }
+
+  return success;
+}
+
+static gboolean
+gum_linux_check_thread_offset (gsize offset,
+                               gboolean * match)
+{
+  gboolean success = FALSE;
+  gboolean created_thread;
+  GumLinuxThreadCtx ctx;
+  gpointer * tid_addr;
+  guint8 * tid_data;
+  gsize bytes_read;
+  gint tid;
+
+  created_thread = gum_linux_create_thread (&ctx, TRUE);
+  if (!created_thread)
+    goto beach;
+
+  tid_addr = GSIZE_TO_POINTER (ctx.thread) + offset;
+
+  tid_data = gum_memory_read (tid_addr, sizeof (gint), &bytes_read);
+  if (tid_data == NULL || bytes_read != sizeof (gint))
+    goto beach;
+
+  tid = *((gint *) tid_data);
+
+  g_free (tid_data);
+
+  *match = tid == ctx.tid;
+
+  success = TRUE;
+
+beach:
+  if (created_thread)
+  {
+    if (!gum_linux_dispose_thread (&ctx))
+      success = FALSE;
+  }
+
+  return success;
+}
+
+static gboolean
+gum_linux_find_list_anchor (GumLinuxPThreadSpec * spec,
+                            gboolean custom_stack)
+{
+  gboolean success = FALSE;
+  gboolean created_thread;
+  GumLinuxThreadCtx ctx;
+  pthread_t current, next, prev;
+  guint num_threads = 0;
+  gpointer anchor = NULL;
+
+  created_thread = gum_linux_create_thread (&ctx, custom_stack);
+  if (!created_thread)
+    goto beach;
+
+  current = ctx.thread;
+
+  do
+  {
+    gpointer current_list_head;
+    GumThreadId tid;
+    gboolean is_valid_anchor;
+
+    current_list_head = GSIZE_TO_POINTER (current) + spec->flink_offset;
+
+    /*
+     * If we get the TID from our thread and check if exists then if it doesn't
+     * we have probably found the list anchor. But we check we don't find more
+     * than one that fails.
+     */
+
+    tid = gum_linux_query_pthread_tid (current, spec);
+    if (gum_process_has_thread (tid))
+    {
+      /* If the TID is of a valid thread, then this is not the list anchor. */
+      is_valid_anchor = FALSE;
+    }
+    else if (tid == 0)
+    {
+      GumTestByAddressContext tba;
+
+      /*
+       * If our TID is zero, then this can indicate a thread that has exited,
+       * but not yet been joined. So in this case, we will perform an additional
+       * check that our list anchor is in a mapping backed by a file. It should
+       * be in the globals of libc.so or libpthread.so, whereas our pthreads
+       * themselves live at the base of the thread stacks. This should avoid any
+       * false positives. We don't do this check for every candidate as it
+       * requires us to walk the memory map which may add a lot of overhead.
+       */
+      gum_test_by_address_context_init (&tba, GUM_ADDRESS (current_list_head));
+
+      gum_process_enumerate_ranges (GUM_PAGE_NO_ACCESS,
+          (GumFoundRangeFunc) gum_test_pthread_globals_if_containing_address,
+          &tba);
+      if (!tba.found)
+        goto beach;
+
+      is_valid_anchor = tba.is_pthread_globals;
+
+      gum_test_by_address_context_free (&tba);
+    }
+    else
+    {
+      is_valid_anchor = TRUE;
+    }
+
+    if (is_valid_anchor)
+    {
+      if (anchor == NULL)
+        anchor = current_list_head;
+      else
+        goto beach;
+    }
+
+    if (!gum_linux_thread_read_flink (spec, current, &next))
+      goto beach;
+
+    if (!gum_linux_thread_read_blink (spec, next, &prev))
+      goto beach;
+
+    if (prev != current)
+      goto beach;
+
+    current = next;
+    num_threads++;
+
+    /*
+     * If we find more than the maximum expected number of threads without
+     * getting back to the start of the list, then terminate to avoid an
+     * infinite loop.
+     */
+    if (num_threads == GUM_LINUX_MAX_THREADS)
+      goto beach;
+  }
+  while (current != ctx.thread);
+
+  if (custom_stack)
+    spec->stack_user = anchor;
+  else
+    spec->stack_used = anchor;
+
+  success = TRUE;
+
+beach:
+  if (created_thread)
+  {
+    if (!gum_linux_dispose_thread (&ctx))
+      success = FALSE;
+  }
+
+  return success;
+}
+
+static void
+gum_test_by_address_context_init (GumTestByAddressContext * ctx,
+                                  GumAddress address)
+{
+  ctx->address = address;
+  ctx->found = FALSE;
+  ctx->is_pthread_globals = FALSE;
+  ctx->last_file = NULL;
+}
+
+static void
+gum_test_by_address_context_free (GumTestByAddressContext * ctx)
+{
+  g_free (ctx->last_file);
+}
+
+static gboolean
+gum_test_pthread_globals_if_containing_address (const GumRangeDetails * details,
+                                                GumTestByAddressContext * fc)
+{
+  /*
+   * Our list anchors are globals within the library containing the pthreads
+   * implementatinon. This is typically either within libc.so itself, or a
+   * standalone libpthreads.so depending on the configuration of libc.
+   *
+   * Since our global may reside either within the .data or .bss sections of the
+   * library, we check for both. In the case of the .data section, we can check
+   * the filename of the mapping to see if it's a pthreads library (this will be
+   * a private mapping of the library such that modifications are not written
+   * back to the original file).
+   *
+   * If our global is within the .bss, then this will typically be an anonymous
+   * mapping. But should immediately follow the mappings of the library in the
+   * address map. We therefore cache the filename of the previous mapping at
+   * each iteration, such that we can check for this case too.
+   */
+  static const gchar * libs[] = { "/libc", "/libpthread" };
+
+  if (GUM_MEMORY_RANGE_INCLUDES (details->range, fc->address))
+  {
+    guint i;
+
+    fc->found = TRUE;
+
+    for (i = 0; i != G_N_ELEMENTS (libs) && !fc->is_pthread_globals; i++)
+    {
+      gboolean current_mapping_is_a_pthreads_library;
+      gboolean previous_mapping_was_a_pthreads_library;
+
+      current_mapping_is_a_pthreads_library =
+          details->file != NULL &&
+          details->file->path != NULL &&
+          strstr (details->file->path, libs[i]) != NULL;
+      if (current_mapping_is_a_pthreads_library)
+        fc->is_pthread_globals = TRUE;
+
+      previous_mapping_was_a_pthreads_library =
+          fc->last_file != NULL &&
+          strstr (fc->last_file, libs[i]) != NULL;
+      if (previous_mapping_was_a_pthreads_library)
+        fc->is_pthread_globals = TRUE;
+    }
+  }
+  else
+  {
+    g_free (fc->last_file);
+
+    if (details->file != NULL)
+      fc->last_file = g_strdup (details->file->path);
+    else
+      fc->last_file = NULL;
+  }
+
+  return !fc->found;
+}
+
+static gboolean
+gum_linux_find_lock (GumLinuxPThreadSpec * spec)
+{
+  guint major;
+  guint minor;
+  gpointer addr_from_stack_used;
+  gpointer addr_from_stack_user;
+
+  if (!gum_linux_get_libc_version (&major, &minor))
+    return FALSE;
+
+  /*
+   * Prior to glibc 2.33, the location of the lock is unpredicatable, so we
+   * will just have to make do without and accept the possibility of a
+   * potential race.
+   */
+  if (major < 2 || (major == 2 && minor < 33))
+    return TRUE;
+
+  if (spec->stack_used == NULL || spec->stack_user == NULL)
+    return FALSE;
+
+  addr_from_stack_used = ((gpointer) spec->stack_used) -
+      G_STRUCT_OFFSET (GumLinuxGlobalsFragment, _dl_stack_used);
+  addr_from_stack_user = ((gpointer) spec->stack_user) -
+      G_STRUCT_OFFSET (GumLinuxGlobalsFragment, _dl_stack_user);
+
+  if (addr_from_stack_used != addr_from_stack_user)
+    return FALSE;
+
+  spec->stack_lock = (GumGlibcLock *) (addr_from_stack_used +
+      G_STRUCT_OFFSET (GumLinuxGlobalsFragment, _dl_stack_cache_lock));
+
+  return TRUE;
+}
+
+static gboolean
+gum_linux_get_libc_version (guint * major,
+                            guint * minor)
+{
+  gboolean success = FALSE;
+  const gchar * version;
+  gchar ** parts, * end;
+  guint64 maj, min;
+
+  *major = 0;
+  *minor = 0;
+
+  version = gnu_get_libc_version ();
+
+  parts = g_strsplit (version, ".", 2);
+  if (parts[0] == NULL || parts[1] == NULL)
+    goto beach;
+
+  maj = g_ascii_strtoull (parts[0], &end, 10);
+  if (*end != '\0')
+    goto beach;
+
+  min = g_ascii_strtoull (parts[1], &end, 10);
+  if (*end != '\0')
+    goto beach;
+
+  *major = maj;
+  *minor = min;
+
+  success = TRUE;
+
+beach:
+  g_strfreev (parts);
+
+  return success;
+}
+
+static gboolean
+gum_linux_find_start_impl (GumLinuxPThreadSpec * spec)
+{
+  gboolean success = FALSE;
+  gboolean created_thread;
+  GumLinuxThreadCtx ctx;
+#ifdef HAVE_ARM
+  gboolean is_thumb;
+#endif
+  csh capstone;
+  cs_insn * insn;
+  const uint8_t * code;
+  gsize i;
+  gboolean found_start = FALSE;
+
+  created_thread = gum_linux_create_thread (&ctx, TRUE);
+  if (!created_thread)
+    goto beach;
+
+  gum_cs_arch_register_native ();
+#ifdef HAVE_ARM
+  is_thumb = (GPOINTER_TO_SIZE (ctx.ret) & 1) != 0;
+  cs_open (GUM_DEFAULT_CS_ARCH,
+      is_thumb
+        ? CS_MODE_THUMB | CS_MODE_V8 | GUM_DEFAULT_CS_ENDIAN
+        : GUM_DEFAULT_CS_MODE,
+      &capstone);
+  code = GSIZE_TO_POINTER (GPOINTER_TO_SIZE (ctx.ret) & ~1);
+#else
+  cs_open (GUM_DEFAULT_CS_ARCH, GUM_DEFAULT_CS_MODE, &capstone);
+  code = ctx.ret;
+#endif
+  cs_option (capstone, CS_OPT_DETAIL, CS_OPT_ON);
+  cs_option (capstone, CS_OPT_SKIPDATA, CS_OPT_ON);
+
+  for (i = 0; i != GUM_MAX_INSTRUCTION_SIZE; i++)
+  {
+    if (cs_disasm (capstone, code - i, i, GPOINTER_TO_SIZE (code - i), 1, &insn)
+        == 0)
+    {
+      continue;
+    }
+
+    if (insn->size != i)
+      continue;
+
+    if (gum_linux_is_call (insn))
+    {
+      found_start = TRUE;
+      spec->start_impl = GSIZE_TO_POINTER (insn->address);
+      break;
+    }
+
+    cs_free (insn, 1);
+    insn = NULL;
+  }
+  if (!found_start)
+    goto beach;
+
+  success = TRUE;
+
+beach:
+  if (insn != NULL)
+    cs_free (insn, 1);
+
+  cs_close (&capstone);
+
+  if (created_thread)
+  {
+    if (!gum_linux_dispose_thread (&ctx))
+      success = FALSE;
+  }
+
+  return success;
+}
+
+static gboolean
+gum_linux_is_call (cs_insn * insn)
+{
+  switch (insn->id)
+  {
+#if defined (HAVE_I386)
+    case X86_INS_CALL:
+      return TRUE;
+#elif defined (HAVE_ARM)
+    case ARM_INS_BL:
+    case ARM_INS_BLX:
+      return TRUE;
+#elif defined (HAVE_ARM64)
+    case ARM64_INS_BL:
+    case ARM64_INS_BLR:
+    case ARM64_INS_BLRAA:
+    case ARM64_INS_BLRAAZ:
+    case ARM64_INS_BLRAB:
+    case ARM64_INS_BLRABZ:
+      return TRUE;
+#elif defined (HAVE_MIPS)
+    case MIPS_INS_JAL:
+    case MIPS_INS_JALR:
+      return TRUE;
+#else
+# error FIXME
+#endif
+    default:
+      break;
+  }
+
+  return FALSE;
+}
+
+static gboolean
+gum_linux_create_thread (GumLinuxThreadCtx * ctx,
+                         gboolean custom_stack)
+{
+  pthread_attr_t attr;
+  guint page_size;
+  guint num_pages;
+
+  if (pthread_attr_init (&attr) != 0)
+    return FALSE;
+
+  if (custom_stack)
+  {
+    page_size = gum_query_page_size ();
+
+    num_pages = GUM_THREAD_STACK_SIZE / page_size;
+    if (GUM_THREAD_STACK_SIZE % page_size != 0)
+      num_pages++;
+
+    ctx->stack = gum_alloc_n_pages (num_pages, GUM_PAGE_RW);
+    if (ctx->stack == NULL)
+      return FALSE;
+
+    if (pthread_attr_setstack (&attr, ctx->stack, GUM_THREAD_STACK_SIZE) != 0)
+      return FALSE;
+  }
+  else
+  {
+    ctx->stack = NULL;
+  }
+
+  g_mutex_init (&ctx->mutex);
+  g_cond_init (&ctx->cond);
+  ctx->start = FALSE;
+  ctx->exit = FALSE;
+
+  if (pthread_create (&ctx->thread, &attr, gum_linux_thread_proc, ctx) != 0)
+    return FALSE;
+
+  g_mutex_lock (&ctx->mutex);
+  while (!ctx->start)
+    g_cond_wait (&ctx->cond, &ctx->mutex);
+  g_mutex_unlock (&ctx->mutex);
+
+  return TRUE;
+}
+
+static gboolean
+gum_linux_dispose_thread (GumLinuxThreadCtx * ctx)
+{
+  g_mutex_lock (&ctx->mutex);
+  ctx->exit = TRUE;
+  g_cond_signal (&ctx->cond);
+  g_mutex_unlock (&ctx->mutex);
+
+  if (pthread_join (ctx->thread, NULL) != 0)
+    return FALSE;
+
+  if (ctx->stack != NULL)
+    gum_free_pages (ctx->stack);
+
+  return TRUE;
+}
+
+static gpointer
+gum_linux_thread_proc (gpointer param)
+{
+  GumLinuxThreadCtx * ctx = param;
+
+  ctx->tid = gum_process_get_current_thread_id ();
+  ctx->ret = __builtin_extract_return_addr (__builtin_return_address (0));
+
+  g_mutex_lock (&ctx->mutex);
+
+  ctx->start = TRUE;
+  g_cond_signal (&ctx->cond);
+
+  while (!ctx->exit)
+    g_cond_wait (&ctx->cond, &ctx->mutex);
+
+  g_mutex_unlock (&ctx->mutex);
+
+  return NULL;
+}
+
+static gboolean
+gum_linux_thread_read_flink (const GumLinuxPThreadSpec * spec,
+                             pthread_t current,
+                             pthread_t * next)
+{
+  gboolean success = FALSE;
+  gpointer flink;
+  guint8 * data;
+  gsize bytes_read;
+  gpointer next_flink;
+  pthread_t thread;
+
+  flink = GSIZE_TO_POINTER (current) + spec->flink_offset;
+
+  data = gum_memory_read (flink, sizeof (gpointer), &bytes_read);
+  if (data == NULL || bytes_read != sizeof (gpointer))
+    goto beach;
+
+  next_flink = *(gpointer *) data;
+  thread = (pthread_t) (next_flink - spec->flink_offset);
+  if (thread == current)
+    goto beach;
+
+  *next = thread;
+  success = TRUE;
+
+beach:
+  g_free (data);
+
+  return success;
+}
+
+static gboolean
+gum_linux_thread_read_blink (const GumLinuxPThreadSpec * spec,
+                             pthread_t current,
+                             pthread_t * prev)
+{
+  gboolean success = FALSE;
+  gpointer blink;
+  guint8 * data;
+  gsize bytes_read;
+  gpointer next_blink;
+  pthread_t thread;
+
+  blink = GSIZE_TO_POINTER (current) + spec->blink_offset;
+
+  data = gum_memory_read (blink, sizeof (gpointer), &bytes_read);
+  if (data == NULL || bytes_read != sizeof (gpointer))
+    goto beach;
+
+  next_blink = *(gpointer *) data;
+  /*
+   * Our blink points to the start of the list head (the flink comes first),
+   * not the blink field within it.
+   */
+  thread = (pthread_t) (next_blink - spec->flink_offset);
+  if (thread == current)
+    goto beach;
+
+  *prev = thread;
+  success = TRUE;
+
+beach:
+  g_free (data);
+
+  return success;
+}
+
+static void
+glibc_lock_acquire (GumGlibcLock * lock)
+{
+  if (!__sync_bool_compare_and_swap (lock, 0, 1))
+  {
+    if (__atomic_load_n (lock, __ATOMIC_RELAXED) == 2)
+      goto wait;
+
+    while (__atomic_exchange_n (lock, 2, __ATOMIC_ACQUIRE) != 0)
+    {
+wait:
+      syscall (SYS_futex, lock, FUTEX_WAIT_PRIVATE, 2, NULL);
+    }
+  }
+}
+
+static void
+glibc_lock_release (GumGlibcLock * lock)
+{
+  if (__atomic_exchange_n (lock, 0, __ATOMIC_RELEASE) != 1)
+    syscall (SYS_futex, lock, FUTEX_WAKE_PRIVATE, 1);
+}
+
+#elif defined (HAVE_MUSL)
+
+void
+gum_linux_lock_pthread_list (const GumLinuxPThreadSpec * spec)
+{
+  spec->tl_lock ();
+}
+
+void
+gum_linux_unlock_pthread_list (const GumLinuxPThreadSpec * spec)
+{
+  spec->tl_unlock ();
+}
+
+static gboolean
+gum_detect_pthread_internals (GumLinuxPThreadSpec * spec)
+{
+  int main_tid;
+  GumLinuxPThread * cur;
+  GumModule * libc;
+  gpointer create_prologue;
+#ifdef HAVE_ARM
+  gboolean is_thumb;
+#endif
+  csh capstone;
+  cs_insn * insn;
+  const uint8_t * code;
+  size_t size;
+  uint64_t addr;
+
+  main_tid = getpid ();
+  for (cur = (GumLinuxPThread *) pthread_self ();
+      cur->tid != main_tid;
+      cur = cur->next)
+  {
+  }
+  spec->main_thread = cur;
+
+  libc = gum_process_get_libc_module ();
+
+  create_prologue = GSIZE_TO_POINTER (gum_module_find_export_by_name (libc,
+        "pthread_create"));
+
+  gum_cs_arch_register_native ();
+#ifdef HAVE_ARM
+  is_thumb = (GPOINTER_TO_SIZE (create_prologue) & 1) != 0;
+  cs_open (GUM_DEFAULT_CS_ARCH,
+      is_thumb
+        ? CS_MODE_THUMB | CS_MODE_V8 | GUM_DEFAULT_CS_ENDIAN
+        : GUM_DEFAULT_CS_MODE,
+      &capstone);
+  code = GSIZE_TO_POINTER (GPOINTER_TO_SIZE (create_prologue) & ~1);
+#else
+  cs_open (GUM_DEFAULT_CS_ARCH, GUM_DEFAULT_CS_MODE, &capstone);
+  code = create_prologue;
+#endif
+  cs_option (capstone, CS_OPT_DETAIL, CS_OPT_ON);
+  cs_option (capstone, CS_OPT_SKIPDATA, CS_OPT_ON);
+
+  insn = cs_malloc (capstone);
+
+  code += gum_interceptor_detect_hook_size (code, capstone, insn);
+  size = 1024;
+  addr = GPOINTER_TO_SIZE (code);
+
+#if defined (HAVE_I386)
+  {
+    gconstpointer btr_end = NULL;
+    GPtrArray * potential_start_funcs;
+
+    potential_start_funcs = g_ptr_array_sized_new (4);
+
+    while ((spec->tl_lock == NULL || spec->start_impl == NULL) &&
+        cs_disasm_iter (capstone, &code, &size, &addr, insn))
+    {
+      const cs_x86 * x86 = &insn->detail->x86;
+
+      switch (insn->id)
+      {
+        case X86_INS_BTR:
+          btr_end = code;
+          break;
+        case X86_INS_CALL:
+        {
+          const cs_x86_op * target = &x86->operands[0];
+          if (code - insn->size == btr_end &&
+              target->type == X86_OP_IMM)
+          {
+            spec->tl_lock = GSIZE_TO_POINTER (target->imm);
+          }
+
+          break;
+        }
+        case X86_INS_LEA:
+        {
+          const cs_x86_op * src = &x86->operands[1];
+
+          if (src->mem.base == X86_REG_RIP)
+          {
+            g_ptr_array_add (potential_start_funcs,
+                GSIZE_TO_POINTER (addr + src->mem.disp));
+          }
+
+          break;
+        }
+        case X86_INS_CMOVE:
+          if (potential_start_funcs->len >= 2)
+          {
+            spec->start_impl = g_ptr_array_index (potential_start_funcs,
+                potential_start_funcs->len - 1);
+            spec->start_c11_impl = g_ptr_array_index (potential_start_funcs,
+                potential_start_funcs->len - 2);
+          }
+
+          break;
+        default:
+          break;
+      }
+    }
+
+    g_ptr_array_unref (potential_start_funcs);
+
+    if (spec->tl_lock == NULL)
+      goto beach;
+
+    code = (gpointer) spec->tl_lock;
+    size = 512;
+    addr = GPOINTER_TO_SIZE (code);
+    while (spec->tl_unlock == NULL &&
+        cs_disasm_iter (capstone, &code, &size, &addr, insn))
+    {
+      if (insn->id == X86_INS_RET)
+        spec->tl_unlock = (gpointer) code;
+    }
+  }
+#elif defined (HAVE_ARM)
+  {
+    gboolean expecting_tl_lock_call = FALSE;
+
+    while ((spec->tl_lock == NULL || spec->start_impl == NULL) &&
+        cs_disasm_iter (capstone, &code, &size, &addr, insn))
+    {
+      const cs_arm * arm = &insn->detail->arm;
+
+      switch (insn->id)
+      {
+        case ARM_INS_BIC:
+        {
+          const cs_arm_op * val = &arm->operands[2];
+
+          if (spec->tl_lock == NULL &&
+              val->type == ARM_OP_IMM &&
+              val->imm == 1)
+          {
+            expecting_tl_lock_call = TRUE;
+          }
+
+          break;
+        }
+        case ARM_INS_BL:
+        {
+          const cs_arm_op * target = &arm->operands[0];
+
+          if (expecting_tl_lock_call)
+          {
+            spec->tl_lock = GSIZE_TO_POINTER (target->imm | (is_thumb ? 1 : 0));
+
+            expecting_tl_lock_call = FALSE;
+          }
+
+          break;
+        }
+        case ARM_INS_CMP:
+        {
+          const cs_arm_op * val = &arm->operands[1];
+
+          if (spec->tl_lock != NULL &&
+              val->type == ARM_OP_IMM &&
+              val->imm == 0xffffffffU)
+          {
+            if (!cs_disasm_iter (capstone, &code, &size, &addr, insn))
+              goto beach;
+            if (insn->id != ARM_INS_B || arm->cc != ARM_CC_EQ)
+              goto beach;
+
+            spec->start_c11_impl = gum_parse_ldrpc (
+                GSIZE_TO_POINTER (arm->operands[0].imm), capstone, insn);
+            if (spec->start_c11_impl == NULL)
+              goto beach;
+
+            spec->start_impl = gum_parse_ldrpc (code, capstone, insn);
+            if (spec->start_impl == NULL)
+              goto beach;
+          }
+        }
+        default:
+          break;
+      }
+    }
+
+    if (spec->tl_lock == NULL)
+      goto beach;
+
+    code = GSIZE_TO_POINTER (GPOINTER_TO_SIZE (spec->tl_lock) & ~1);
+    size = 512;
+    addr = GPOINTER_TO_SIZE (code);
+    while (spec->tl_unlock == NULL &&
+        cs_disasm_iter (capstone, &code, &size, &addr, insn))
+    {
+      if (insn->id == ARM_INS_POP)
+      {
+        while (cs_disasm_iter (capstone, &code, &size, &addr, insn))
+        {
+          if (insn->id == ARM_INS_LDR &&
+              insn->detail->arm.operands[0].reg == ARM_REG_R2)
+          {
+            break;
+          }
+        }
+
+        spec->tl_unlock =
+            GSIZE_TO_POINTER ((addr - insn->size) | (is_thumb ? 1 : 0));
+      }
+    }
+  }
+#elif defined (HAVE_ARM64)
+  {
+    GHashTable * regvals;
+    gboolean expecting_tl_lock_call = FALSE;
+
+    regvals = g_hash_table_new_full (NULL, NULL, NULL, NULL);
+
+    while ((spec->tl_lock == NULL || spec->start_impl == NULL) &&
+        cs_disasm_iter (capstone, &code, &size, &addr, insn))
+    {
+      const cs_arm64 * arm64 = &insn->detail->arm64;
+
+      switch (insn->id)
+      {
+        case ARM64_INS_AND:
+        {
+          const cs_arm64_op * val = &arm64->operands[2];
+
+          if (spec->tl_lock == NULL &&
+              val->type == ARM64_OP_IMM &&
+              val->imm == G_GUINT64_CONSTANT (0xfffffffeffffffff))
+          {
+            expecting_tl_lock_call = TRUE;
+          }
+
+          break;
+        }
+        case ARM64_INS_BL:
+        {
+          const cs_arm64_op * target = &arm64->operands[0];
+
+          if (expecting_tl_lock_call)
+          {
+            spec->tl_lock = GSIZE_TO_POINTER (target->imm);
+
+            expecting_tl_lock_call = FALSE;
+          }
+
+          break;
+        }
+        case ARM64_INS_ADRP:
+        {
+          const cs_arm64_op * dst = &arm64->operands[0];
+          const cs_arm64_op * val = &arm64->operands[1];
+
+          g_hash_table_insert (regvals, GUINT_TO_POINTER (dst->reg),
+              GSIZE_TO_POINTER (val->imm));
+
+          break;
+        }
+        case ARM64_INS_ADD:
+        {
+          const cs_arm64_op * dst = &arm64->operands[0];
+          const cs_arm64_op * n = &arm64->operands[1];
+          const cs_arm64_op * m = &arm64->operands[2];
+          gsize old_val, new_val;
+
+          old_val = GPOINTER_TO_SIZE (
+              g_hash_table_lookup (regvals, GUINT_TO_POINTER (n->reg)));
+
+          if (m->type == ARM64_OP_IMM)
+          {
+            new_val = old_val + m->imm;
+          }
+          else
+          {
+            new_val = old_val + GPOINTER_TO_SIZE (
+                g_hash_table_lookup (regvals, GUINT_TO_POINTER (m->reg)));
+          }
+
+          g_hash_table_insert (regvals, GUINT_TO_POINTER (dst->reg),
+              GSIZE_TO_POINTER (new_val));
+
+          break;
+        }
+        case ARM64_INS_CSEL:
+        {
+          const cs_arm64_op * n = &arm64->operands[1];
+          const cs_arm64_op * m = &arm64->operands[2];
+
+          spec->start_impl =
+              g_hash_table_lookup (regvals, GUINT_TO_POINTER (n->reg));
+          spec->start_c11_impl =
+              g_hash_table_lookup (regvals, GUINT_TO_POINTER (m->reg));
+
+          break;
+        }
+        default:
+          break;
+      }
+    }
+
+    g_hash_table_unref (regvals);
+
+    if (spec->tl_lock == NULL)
+      goto beach;
+
+    code = (gpointer) spec->tl_lock;
+    size = 512;
+    addr = GPOINTER_TO_SIZE (code);
+    while (spec->tl_unlock == NULL &&
+        cs_disasm_iter (capstone, &code, &size, &addr, insn))
+    {
+      if (insn->id == ARM64_INS_RET)
+        spec->tl_unlock = (gpointer) code;
+    }
+  }
+#else
+# error FIXME
+#endif
+
+beach:
+  cs_free (insn, 1);
+
+  cs_close (&capstone);
+
+  if (spec->tl_unlock == NULL || spec->start_impl == NULL)
+    return FALSE;
+
+  spec->terminate_impl = GSIZE_TO_POINTER (gum_module_find_export_by_name (libc,
+        "pthread_exit"));
+
+  return spec->terminate_impl != NULL;
+}
+
+# ifdef HAVE_ARM
+
+static gpointer
+gum_parse_ldrpc (const uint8_t * code,
+                 csh capstone,
+                 cs_insn * insn)
+{
+  const cs_arm * arm = &insn->detail->arm;
+  size_t size;
+  uint64_t addr;
+  arm_reg dst_reg;
+  const cs_arm_op * src;
+  gsize pc, location;
+  guint32 delta;
+  const cs_arm_op * op1;
+
+  size = 8;
+  addr = GPOINTER_TO_SIZE (code);
+  pc = addr + 4;
+  if (!cs_disasm_iter (capstone, &code, &size, &addr, insn))
+    return NULL;
+  if (insn->id != ARM_INS_LDR)
+    return NULL;
+  dst_reg = arm->operands[0].reg;
+  src = &arm->operands[1];
+  if (src->mem.base != ARM_REG_PC)
+    return NULL;
+  location = (pc & ~(4 - 1)) + src->mem.disp;
+  delta = *((gssize *) GSIZE_TO_POINTER (location));
+
+  pc = addr + 4;
+  if (!cs_disasm_iter (capstone, &code, &size, &addr, insn))
+    return NULL;
+  if (insn->id != ARM_INS_ADD || arm->op_count != 2)
+    return NULL;
+  if (arm->operands[0].reg != dst_reg)
+    return NULL;
+  op1 = &arm->operands[1];
+  if (op1->type != ARM_OP_REG || op1->reg != ARM_REG_PC)
+    return NULL;
+
+  return GSIZE_TO_POINTER (pc + delta);
+}
+
+# endif
+
+static GumMuslStartArgs *
+gum_query_pthread_start_args (pthread_t thread,
+                              const GumLinuxPThreadSpec * spec)
+{
+  GumLinuxPThread * pth = (GumLinuxPThread *) thread;
+  guint8 * stack;
+
+  if (pth == spec->main_thread)
+    return NULL;
+
+  stack = pth->stack;
+  stack -= GPOINTER_TO_SIZE (stack) % sizeof (gpointer);
+  return (GumMuslStartArgs *) (stack - sizeof (GumMuslStartArgs));
+}
+
+#elif defined (HAVE_ANDROID)
+
+void
+gum_linux_lock_pthread_list (const GumLinuxPThreadSpec * spec)
+{
+  pthread_rwlock_rdlock (spec->thread_list_lock);
+}
+
+void
+gum_linux_unlock_pthread_list (const GumLinuxPThreadSpec * spec)
+{
+  pthread_rwlock_unlock (spec->thread_list_lock);
+}
+
+static gboolean
+gum_detect_pthread_internals (GumLinuxPThreadSpec * spec)
+{
+  GumModule * libc;
+  gpointer start_prologue;
+#ifdef HAVE_ARM
+  gboolean is_thumb;
+#endif
+  csh capstone;
+  cs_insn * insn;
+  const uint8_t * code;
+  size_t size;
+  uint64_t addr;
+
+  libc = gum_process_get_libc_module ();
+
+  spec->thread_list = GSIZE_TO_POINTER (gum_module_find_symbol_by_name (libc,
+      "_ZL13g_thread_list"));
+  spec->thread_list_lock = GSIZE_TO_POINTER (gum_module_find_symbol_by_name (
+        libc, "_ZL18g_thread_list_lock"));
+  if (spec->thread_list == NULL || spec->thread_list_lock == NULL)
+    return FALSE;
+
+  start_prologue = GSIZE_TO_POINTER (gum_module_find_symbol_by_name (libc,
+        "_ZL15__pthread_startPv"));
+  if (start_prologue == NULL)
+    return FALSE;
+
+  gum_cs_arch_register_native ();
+#ifdef HAVE_ARM
+  is_thumb = (GPOINTER_TO_SIZE (start_prologue) & 1) != 0;
+  cs_open (GUM_DEFAULT_CS_ARCH,
+      is_thumb
+        ? CS_MODE_THUMB | CS_MODE_V8 | GUM_DEFAULT_CS_ENDIAN
+        : GUM_DEFAULT_CS_MODE,
+      &capstone);
+  code = GSIZE_TO_POINTER (GPOINTER_TO_SIZE (start_prologue) & ~1);
+#else
+  cs_open (GUM_DEFAULT_CS_ARCH, GUM_DEFAULT_CS_MODE, &capstone);
+  code = start_prologue;
+#endif
+  cs_option (capstone, CS_OPT_DETAIL, CS_OPT_ON);
+  cs_option (capstone, CS_OPT_SKIPDATA, CS_OPT_ON);
+
+  insn = cs_malloc (capstone);
+
+  code += gum_interceptor_detect_hook_size (code, capstone, insn);
+  size = 1024;
+  addr = GPOINTER_TO_SIZE (code);
+
+#if defined (HAVE_I386)
+# if GLIB_SIZEOF_VOID_P == 4
+#  define GUM_CS_XSP_REG X86_REG_ESP
+#  define GUM_CS_XBP_REG X86_REG_EBP
+# else
+#  define GUM_CS_XSP_REG X86_REG_RSP
+#  define GUM_CS_XBP_REG X86_REG_RBP
+# endif
+  {
+    GArray * sizes;
+    guint insn_index;
+    guint mov_index = 0;
+    gpointer mov_location = NULL;
+
+    sizes = g_array_sized_new (FALSE, FALSE, sizeof (guint16), 32);
+
+    for (insn_index = 0; spec->start_impl == NULL &&
+        cs_disasm_iter (capstone, &code, &size, &addr, insn); insn_index++)
+    {
+      guint16 size = insn->size;
+      const cs_x86 * x86 = &insn->detail->x86;
+
+      g_array_append_val (sizes, size);
+
+      switch (insn->id)
+      {
+        case X86_INS_MOV:
+        {
+          const cs_x86_op * src = &x86->operands[1];
+
+          if (src->type == X86_OP_MEM &&
+              src->mem.segment == X86_REG_INVALID &&
+              src->mem.base != GUM_CS_XSP_REG &&
+              src->mem.base != GUM_CS_XBP_REG &&
+              src->mem.index == X86_REG_INVALID)
+          {
+            mov_index = insn_index;
+            mov_location = (gpointer) (code - insn->size);
+            spec->start_parameter_offset = src->mem.disp;
+          }
+
+          break;
+        }
+        case X86_INS_CALL:
+        {
+          const cs_x86_op * target = &x86->operands[0];
+
+          if (target->type == X86_OP_MEM && mov_location != NULL)
+          {
+            guint hook_delta, i;
+            gpointer hook_location;
+
+            hook_delta = 0;
+            for (i = mov_index - 2; i != mov_index; i++)
+              hook_delta += g_array_index (sizes, guint16, i);
+
+            hook_location = mov_location - hook_delta;
+
+            spec->start_impl = hook_location;
+            spec->start_routine_offset = target->mem.disp;
+          }
+
+          break;
+        }
+        default:
+          break;
+      }
+    }
+
+    g_array_unref (sizes);
+  }
+#elif defined (HAVE_ARM)
+  {
+    GArray * sizes;
+    guint insn_index;
+    guint ldrd_index = 0;
+    gpointer ldrd_location = NULL;
+    arm_reg func_reg = ARM_REG_INVALID;
+
+    sizes = g_array_sized_new (FALSE, FALSE, sizeof (guint16), 32);
+
+    for (insn_index = 0; spec->start_impl == NULL &&
+        cs_disasm_iter (capstone, &code, &size, &addr, insn); insn_index++)
+    {
+      guint16 size = insn->size;
+      const cs_arm * arm = &insn->detail->arm;
+
+      g_array_append_val (sizes, size);
+
+      switch (insn->id)
+      {
+        case ARM_INS_LDRD:
+          ldrd_index = insn_index;
+          ldrd_location = (gpointer) (code - insn->size);
+          func_reg = arm->operands[0].reg;
+          spec->start_routine_offset = arm->operands[2].mem.disp;
+          spec->start_parameter_offset = spec->start_routine_offset + 4;
+          break;
+        case ARM_INS_BLX:
+          if (arm->operands[0].type == ARM_OP_REG &&
+              arm->operands[0].reg == func_reg)
+          {
+            guint hook_delta, i;
+            gpointer hook_location;
+
+            hook_delta = 0;
+            for (i = ldrd_index - 4; i != ldrd_index; i++)
+              hook_delta += g_array_index (sizes, guint16, i);
+
+            hook_location = ldrd_location - hook_delta;
+
+            spec->start_impl = is_thumb
+                ? GSIZE_TO_POINTER (GPOINTER_TO_SIZE (hook_location) | 1)
+                : hook_location;
+          }
+          break;
+        default:
+          break;
+      }
+    }
+
+    g_array_unref (sizes);
+  }
+#elif defined (HAVE_ARM64)
+  {
+    gpointer ldp_location = NULL;
+    arm64_reg func_reg = ARM64_REG_INVALID;
+
+    while (spec->start_impl == NULL &&
+        cs_disasm_iter (capstone, &code, &size, &addr, insn))
+    {
+      const cs_arm64 * arm64 = &insn->detail->arm64;
+
+      switch (insn->id)
+      {
+        case ARM64_INS_LDP:
+          ldp_location = (gpointer) (code - insn->size);
+          func_reg = arm64->operands[0].reg;
+          spec->start_routine_offset = arm64->operands[2].mem.disp;
+          spec->start_parameter_offset = spec->start_routine_offset + 8;
+          break;
+        case ARM64_INS_BLR:
+          if (arm64->operands[0].reg == func_reg)
+            spec->start_impl = (guint8 *) ldp_location - (4 * sizeof (guint32));
+          break;
+        default:
+          break;
+      }
+    }
+  }
+#else
+# error FIXME
+#endif
+
+  cs_free (insn, 1);
+
+  cs_close (&capstone);
+
+  if (spec->start_impl == NULL)
+    return FALSE;
+
+  spec->terminate_impl = GSIZE_TO_POINTER (gum_module_find_export_by_name (libc,
+        "pthread_exit"));
+
+  return spec->terminate_impl != NULL;
+}
+
+#endif
 
 static gssize
 gum_libc_clone (GumCloneFunc child_func,
@@ -3009,38 +4740,41 @@ gum_libc_clone (GumCloneFunc child_func,
   *(--child_sp) = arg;
 
   {
-    register          gint a0 asm ("$4") = flags;
-    register    gpointer * a1 asm ("$5") = child_sp;
-    register       pid_t * a2 asm ("$6") = parent_tidptr;
-    register GumUserDesc * a3 asm ("$7") = tls;
-    register       pid_t * a4 asm ("$8") = child_tidptr;
+    register          gint a0 asm ("$a0") = flags;
+    register    gpointer * a1 asm ("$a1") = child_sp;
+    register       pid_t * a2 asm ("$a2") = parent_tidptr;
+    register GumUserDesc * a3 asm ("$a3") = tls;
+    register       pid_t * a4 asm ("$t0") = child_tidptr;
     int status;
     gssize retval;
 
     asm volatile (
         ".set noreorder\n\t"
         "addiu $sp, $sp, -24\n\t"
-        "sw $8, 16($sp)\n\t"
-        "li $2, %[clone_syscall]\n\t"
+        "sw $t0, 16($sp)\n\t"
+        "li $v0, %[clone_syscall]\n\t"
         "syscall\n\t"
-        ".set reorder\n\t"
-        "bne $7, $0, 1f\n\t"
-        "bne $2, $0, 1f\n\t"
+        "bne $a3, $0, 1f\n\t"
+        "nop\n\t"
+        "bne $v0, $0, 1f\n\t"
+        "nop\n\t"
 
         /* child: */
-        "lw $4, 0($sp)\n\t"
-        "lw $8, 4($sp)\n\t"
+        "lw $a0, 0($sp)\n\t"
+        "lw $t9, 4($sp)\n\t"
         "addiu $sp, $sp, 8\n\t"
-        "jalr $8\n\t"
-        "move $4, $2\n\t"
-        "li $2, %[exit_syscall]\n\t"
+        "jalr $t9\n\t"
+        "nop\n\t"
+        "move $a0, $2\n\t"
+        "li $v0, %[exit_syscall]\n\t"
         "syscall\n\t"
 
         /* parent: */
         "1:\n\t"
         "addiu $sp, $sp, 24\n\t"
-        "move %0, $7\n\t"
-        "move %1, $2\n\t"
+        "move %0, $a3\n\t"
+        "move %1, $v0\n\t"
+        ".set reorder\n\t"
         : "=r" (status),
           "=r" (retval)
         : "r" (a0),

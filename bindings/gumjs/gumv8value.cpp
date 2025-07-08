@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2016-2023 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2016-2025 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  * Copyright (C) 2021 Abdelrahman Eid <hot3eed@gmail.com>
  *
  * Licence: wxWindows Library Licence, Version 3.1
@@ -857,16 +857,28 @@ _gum_v8_int_get (Local<Value> value,
                  gint * i,
                  GumV8Core * core)
 {
-  if (!value->IsNumber ())
+  if (value->IsNumber ())
   {
-    _gum_v8_throw_ascii_literal (core->isolate, "expected an integer");
-    return FALSE;
+    double v = value.As<Number> ()->Value ();
+    if (v >= G_MININT && v <= G_MAXINT)
+    {
+      *i = (gint) v;
+      return TRUE;
+    }
+  }
+  else if (value->IsBigInt ())
+  {
+    bool lossless;
+    auto v = value.As<BigInt> ()->Int64Value (&lossless);
+    if (lossless && v >= G_MININT && v <= G_MAXINT)
+    {
+      *i = v;
+      return TRUE;
+    }
   }
 
-  double number = value.As<Number> ()->Value ();
-
-  *i = (gint) number;
-  return TRUE;
+  _gum_v8_throw_ascii_literal (core->isolate, "expected an integer");
+  return FALSE;
 }
 
 gboolean
@@ -874,21 +886,28 @@ _gum_v8_uint_get (Local<Value> value,
                   guint * u,
                   GumV8Core * core)
 {
-  if (!value->IsNumber ())
+  if (value->IsNumber ())
   {
-    _gum_v8_throw_ascii_literal (core->isolate, "expected an unsigned integer");
-    return FALSE;
+    double v = value.As<Number> ()->Value ();
+    if (v >= 0 && v <= G_MAXUINT)
+    {
+      *u = (guint) v;
+      return TRUE;
+    }
+  }
+  else if (value->IsBigInt ())
+  {
+    bool lossless;
+    auto v = value.As<BigInt> ()->Uint64Value (&lossless);
+    if (lossless && v <= G_MAXUINT)
+    {
+      *u = v;
+      return TRUE;
+    }
   }
 
-  double number = value.As<Number> ()->Value ();
-  if (number < 0)
-  {
-    _gum_v8_throw_ascii_literal (core->isolate, "expected an unsigned integer");
-    return FALSE;
-  }
-
-  *u = (guint) number;
-  return TRUE;
+  _gum_v8_throw_ascii_literal (core->isolate, "expected an unsigned integer");
+  return FALSE;
 }
 
 Local<Object>
@@ -913,16 +932,25 @@ _gum_v8_int64_get (Local<Value> value,
     *i = value->IntegerValue (isolate->GetCurrentContext ()).ToChecked ();
     return TRUE;
   }
-
-  auto int64 (Local<FunctionTemplate>::New (isolate, *core->int64));
-  if (!int64->HasInstance (value))
+  else if (value->IsBigInt ())
   {
-    _gum_v8_throw_ascii_literal (isolate, "expected an integer");
-    return FALSE;
+    bool lossless;
+    *i = value.As<BigInt> ()->Int64Value (&lossless);
+    if (lossless)
+      return TRUE;
+  }
+  else
+  {
+    auto int64 (Local<FunctionTemplate>::New (isolate, *core->int64));
+    if (int64->HasInstance (value))
+    {
+      *i = _gum_v8_int64_get_value (value.As<Object> ());
+      return TRUE;
+    }
   }
 
-  *i = _gum_v8_int64_get_value (value.As<Object> ());
-  return TRUE;
+  _gum_v8_throw_ascii_literal (isolate, "expected an integer");
+  return FALSE;
 }
 
 gboolean
@@ -1001,6 +1029,13 @@ _gum_v8_uint64_get (Local<Value> value,
       *u = (guint64) v;
       return TRUE;
     }
+  }
+  else if (value->IsBigInt ())
+  {
+    bool lossless;
+    *u = value.As<BigInt> ()->Uint64Value (&lossless);
+    if (lossless)
+      return TRUE;
   }
   else
   {
@@ -1083,6 +1118,16 @@ _gum_v8_size_get (Local<Value> value,
       return TRUE;
     }
   }
+  else if (value->IsBigInt ())
+  {
+    bool lossless;
+    auto v = value.As<BigInt> ()->Uint64Value (&lossless);
+    if (lossless && v <= G_MAXSIZE)
+    {
+      *size = v;
+      return TRUE;
+    }
+  }
   else
   {
     auto uint64 (Local<FunctionTemplate>::New (isolate, *core->uint64));
@@ -1120,6 +1165,16 @@ _gum_v8_ssize_get (Local<Value> value,
     *size = (gsize) value->IntegerValue (isolate->GetCurrentContext ())
         .ToChecked ();
     return TRUE;
+  }
+  else if (value->IsBigInt ())
+  {
+    bool lossless;
+    auto v = value.As<BigInt> ()->Int64Value (&lossless);
+    if (lossless && v >= G_MINSSIZE && v <= G_MAXSSIZE)
+    {
+      *size = v;
+      return TRUE;
+    }
   }
   else
   {
@@ -1280,6 +1335,11 @@ _gum_v8_native_pointer_parse (Local<Value> value,
     }
 
     *ptr = GSIZE_TO_POINTER ((guint64) number);
+    return TRUE;
+  }
+  else if (value->IsBigInt ())
+  {
+    *ptr = GSIZE_TO_POINTER (value.As<BigInt> ()->Uint64Value ());
     return TRUE;
   }
   else
@@ -1717,6 +1777,32 @@ _gum_v8_object_set_page_protection (Local<Object> object,
       key,
       _gum_v8_page_protection_new (core->isolate, prot),
       core);
+}
+
+Local<Object>
+_gum_v8_range_details_new (const GumRangeDetails * details,
+                           GumV8Core * core)
+{
+  auto isolate = core->isolate;
+
+  auto range = Object::New (isolate);
+  _gum_v8_object_set_pointer (range, "base", details->range->base_address,
+      core);
+  _gum_v8_object_set_uint (range, "size", details->range->size, core);
+  _gum_v8_object_set_page_protection (range, "protection", details->protection,
+      core);
+
+  auto f = details->file;
+  if (f != NULL)
+  {
+    auto file = Object::New (isolate);
+    _gum_v8_object_set_utf8 (file, "path", f->path, core);
+    _gum_v8_object_set_uint (file, "offset", f->offset, core);
+    _gum_v8_object_set_uint (file, "size", f->size, core);
+    _gum_v8_object_set (range, "file", file, core);
+  }
+
+  return range;
 }
 
 GArray *

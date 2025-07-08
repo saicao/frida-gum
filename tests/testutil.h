@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2008-2022 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2008-2025 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  * Copyright (C) 2008 Christian Berentsen <jc.berentsen@gmail.com>
  * Copyright (C) 2009 Haakon Sporsheim <haakon.sporsheim@gmail.com>
  *
@@ -90,6 +90,13 @@
 # define TRICKY_MODULE_EXPORT SYSTEM_MODULE_EXPORT
 #endif
 
+#ifdef HAVE_DARWIN
+# define GUM_HOOK_TARGET GUM_NOINLINE \
+    __attribute__ ((section ("__TEXT,__hook_targets"), aligned (16384)))
+#else
+# define GUM_HOOK_TARGET GUM_NOINLINE
+#endif
+
 G_BEGIN_DECLS
 
 G_GNUC_INTERNAL void _test_util_init (void);
@@ -119,6 +126,8 @@ const GumHeapApiList * test_util_heap_apis (void);
 gboolean gum_is_debugger_present (void);
 guint8 gum_try_read_and_write_at (guint8 * a, guint i,
     gboolean * exception_raised_on_read, gboolean * exception_raised_on_write);
+
+void gum_ensure_current_thread_is_named (const gchar * name);
 
 G_END_DECLS
 

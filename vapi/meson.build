@@ -3,6 +3,10 @@ vapis = [
   'frida-gum-heap-@0@.vapi'.format(api_version),
 ]
 
+if host_os_family == 'windows'
+  vapis += ['frida-gum-windows-@0@.vapi'.format(api_version)]
+endif
+
 if host_os_family == 'darwin'
   vapis += ['frida-gum-darwin-@0@.vapi'.format(api_version)]
 endif
@@ -22,4 +26,4 @@ if have_gumjs
   ]
 endif
 
-install_data(vapis, install_dir: 'share/vala/vapi')
+install_data(vapis, install_dir: get_option('prefix') / get_option('datadir') / 'vala' / 'vapi')

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2010-2022 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2010-2024 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  * Copyright (C)      2021 Abdelrahman Eid <hot3eed@gmail.com>
  *
  * Licence: wxWindows Library Licence, Version 3.1
@@ -19,7 +19,7 @@
 #include <string.h>
 
 #ifdef HAVE_ANDROID
-# include "backend-linux/gumandroid.h"
+# include "gum/gumandroid.h"
 #endif
 #ifndef GUM_USE_SYSTEM_ALLOC
 # ifdef HAVE_DARWIN
@@ -96,10 +96,10 @@ G_LOCK_DEFINE_STATIC (gum_softened_code_pages);
 static GHashTable * gum_softened_code_pages;
 #endif
 
-GUM_DEFINE_BOXED_TYPE (GumMatchPattern, gum_match_pattern,
-                       gum_match_pattern_ref, gum_match_pattern_unref)
-GUM_DEFINE_BOXED_TYPE (GumMemoryRange, gum_memory_range, gum_memory_range_copy,
-                       gum_memory_range_free)
+G_DEFINE_BOXED_TYPE (GumMatchPattern, gum_match_pattern, gum_match_pattern_ref,
+                     gum_match_pattern_unref)
+G_DEFINE_BOXED_TYPE (GumMemoryRange, gum_memory_range, gum_memory_range_copy,
+                     gum_memory_range_free)
 
 void
 gum_internal_heap_ref (void)
@@ -266,8 +266,21 @@ gum_memory_patch_code (gpointer address,
 
     gum_clear_cache (address, size);
 
-    if (!gum_try_mprotect (start_page, range_size, GUM_PAGE_RX))
-      return FALSE;
+    if (!rwx_supported)
+    {
+      /*
+       * We don't bother restoring the protection on RWX systems, as we would
+       * have to determine the old protection to be able to do so safely.
+       *
+       * While we could easily do that, it would add overhead, but it's not
+       * really clear that it would have any tangible upsides.
+       *
+       * This behavior is also consistent with Interceptor, so if we later
+       * decide to change it, it also needs changing there.
+       */
+      if (!gum_try_mprotect (start_page, range_size, GUM_PAGE_RX))
+        return FALSE;
+    }
   }
   else
   {
@@ -563,8 +576,8 @@ gum_match_pattern_new_from_regex (const gchar * regex_str)
   GumMatchPattern * pattern;
   GRegex * regex;
 
-  regex = g_regex_new (regex_str, G_REGEX_OPTIMIZE, G_REGEX_MATCH_NOTEMPTY,
-      NULL);
+  regex = g_regex_new (regex_str, G_REGEX_OPTIMIZE | G_REGEX_RAW,
+      G_REGEX_MATCH_NOTEMPTY, NULL);
   if (regex == NULL)
     return NULL;
 

@@ -1,6 +1,7 @@
 /*
- * Copyright (C) 2010-2024 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2010-2025 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  * Copyright (C) 2013 Karl Trygve Kalleberg <karltk@boblycat.org>
+ * Copyright (C) 2024 Håvard Sørbø <havard@hsorbo.no>
  *
  * Licence: wxWindows Library Licence, Version 3.1
  */
@@ -8,6 +9,7 @@
 #include "gumv8script.h"
 
 #include "gumscripttask.h"
+#include "gumsourcemap.h"
 #include "gumv8script-priv.h"
 #include "gumv8script-runtime.h"
 #include "gumv8value.h"
@@ -21,6 +23,7 @@ using namespace v8;
 using namespace v8_inspector;
 
 typedef void (* GumUnloadNotifyFunc) (GumV8Script * self, gpointer user_data);
+typedef void (* GumRuntimeLoadedFunc) (Local<Value> error, gpointer user_data);
 
 enum
 {
@@ -113,6 +116,13 @@ private:
   std::unique_ptr<V8InspectorSession> inspector_session;
 };
 
+struct GumLoadRuntimeData
+{
+  GumRuntimeLoadedFunc func;
+  gpointer data;
+  GDestroyNotify data_destroy;
+};
+
 static void gum_v8_script_iface_init (gpointer g_iface, gpointer iface_data);
 
 static void gum_v8_script_constructed (GObject * object);
@@ -147,10 +157,16 @@ static void gum_v8_script_load_sync (GumScript * script,
     GCancellable * cancellable);
 static void gum_v8_script_do_load (GumScriptTask * task, GumV8Script * self,
     gpointer task_data, GCancellable * cancellable);
+static void gum_v8_script_execute_runtime (GumV8Script * self,
+    GumScriptTask * task);
+static void gum_v8_script_on_runtime_loaded (Local<Value> error,
+    gpointer user_data);
 static void gum_v8_script_execute_entrypoints (GumV8Script * self,
     GumScriptTask * task);
 static void gum_v8_script_on_entrypoints_executed (
     const FunctionCallbackInfo<Value> & info);
+static void gum_v8_script_schedule_load_task_completion (GumV8Script * self,
+    GumScriptTask * task);
 static gboolean gum_v8_script_complete_load_task (GumScriptTask * task);
 static void gum_v8_script_unload (GumScript * script,
     GCancellable * cancellable, GAsyncReadyCallback callback,
@@ -210,11 +226,21 @@ static void gum_v8_script_on_fatal_error (const char * location,
 
 static GumESProgram * gum_es_program_new (void);
 static void gum_es_program_free (GumESProgram * program);
+static void gum_es_program_load_runtime (GumESProgram * self, Isolate * isolate,
+    Local<Context> context, GumRuntimeLoadedFunc func, gpointer data,
+    GDestroyNotify data_destroy);
+static void gum_es_program_on_runtime_load_success (
+    const FunctionCallbackInfo<Value> & info);
+static void gum_es_program_on_runtime_load_failure (
+    const FunctionCallbackInfo<Value> & info);
+static void gum_es_program_on_runtime_loaded (
+    const FunctionCallbackInfo<Value> & info, Local<Value> error);
 
-static GumESAsset * gum_es_asset_new_take (const gchar * name, gpointer data,
-    gsize data_size);
+static GumESAsset * gum_es_asset_new (const gchar * name, gconstpointer data,
+    gsize data_size, GDestroyNotify data_destroy);
 static GumESAsset * gum_es_asset_ref (GumESAsset * asset);
 static void gum_es_asset_unref (GumESAsset * asset);
+static void gum_es_asset_release_data (GumESAsset * asset);
 
 static std::unique_ptr<StringBuffer> gum_string_buffer_from_utf8 (
     const gchar * str);
@@ -511,19 +537,21 @@ gum_v8_script_create_context (GumV8Script * self,
     self->inspector->idleStarted ();
 
     auto global_templ = ObjectTemplate::New (isolate);
-    _gum_v8_core_init (&self->core, self, gumjs_frida_source_map,
-        gum_v8_script_emit, gum_v8_script_backend_get_scheduler (self->backend),
-        isolate, global_templ);
+    _gum_v8_core_init (&self->core, self, gum_v8_script_emit,
+        gum_v8_script_backend_get_scheduler (self->backend), isolate,
+        global_templ);
     _gum_v8_kernel_init (&self->kernel, &self->core, global_templ);
     _gum_v8_memory_init (&self->memory, &self->core, global_templ);
     _gum_v8_module_init (&self->module, &self->core, global_templ);
-    _gum_v8_process_init (&self->process, &self->module, &self->core,
-        global_templ);
     _gum_v8_thread_init (&self->thread, &self->core, global_templ);
+    _gum_v8_process_init (&self->process, &self->module, &self->thread,
+        &self->core, global_templ);
     _gum_v8_file_init (&self->file, &self->core, global_templ);
     _gum_v8_checksum_init (&self->checksum, &self->core, global_templ);
+#ifndef G_OS_NONE
     _gum_v8_stream_init (&self->stream, &self->core, global_templ);
     _gum_v8_socket_init (&self->socket, &self->core, global_templ);
+#endif
 #ifdef HAVE_SQLITE
     _gum_v8_database_init (&self->database, &self->core, global_templ);
 #endif
@@ -539,6 +567,9 @@ gum_v8_script_create_context (GumV8Script * self,
     _gum_v8_stalker_init (&self->stalker, &self->code_writer,
         &self->instruction, &self->core, global_templ);
     _gum_v8_cloak_init (&self->cloak, &self->core, global_templ);
+    _gum_v8_sampler_init (&self->sampler, &self->core, global_templ);
+    _gum_v8_profiler_init (&self->profiler, &self->sampler, &self->interceptor,
+        &self->core, global_templ);
 
     Local<Context> context (Context::New (isolate, NULL, global_templ));
     {
@@ -554,12 +585,14 @@ gum_v8_script_create_context (GumV8Script * self,
     _gum_v8_kernel_realize (&self->kernel);
     _gum_v8_memory_realize (&self->memory);
     _gum_v8_module_realize (&self->module);
-    _gum_v8_process_realize (&self->process);
     _gum_v8_thread_realize (&self->thread);
+    _gum_v8_process_realize (&self->process);
     _gum_v8_file_realize (&self->file);
     _gum_v8_checksum_realize (&self->checksum);
+#ifndef G_OS_NONE
     _gum_v8_stream_realize (&self->stream);
     _gum_v8_socket_realize (&self->socket);
+#endif
 #ifdef HAVE_SQLITE
     _gum_v8_database_realize (&self->database);
 #endif
@@ -572,6 +605,8 @@ gum_v8_script_create_context (GumV8Script * self,
     _gum_v8_code_relocator_realize (&self->code_relocator);
     _gum_v8_stalker_realize (&self->stalker);
     _gum_v8_cloak_realize (&self->cloak);
+    _gum_v8_sampler_realize (&self->sampler);
+    _gum_v8_profiler_realize (&self->profiler);
 
     self->program = gum_v8_script_compile (self, isolate, context, error);
   }
@@ -645,7 +680,8 @@ gum_v8_script_compile (GumV8Script * self,
 
         gchar * asset_data = g_strndup (asset_cursor, asset_size);
 
-        auto asset = gum_es_asset_new_take (asset_name, asset_data, asset_size);
+        auto asset =
+            gum_es_asset_new (asset_name, asset_data, asset_size, g_free);
         g_hash_table_insert (program->es_assets, asset_name, asset);
 
         while (g_str_has_prefix (rest_end, alias_marker))
@@ -775,8 +811,8 @@ _gum_v8_script_load_module (GumV8Script * self,
   }
 
   gchar * name_copy = g_strdup (name);
-  GumESAsset * asset =
-      gum_es_asset_new_take (name_copy, g_strdup (source), strlen (source));
+  GumESAsset * asset = gum_es_asset_new (name_copy, g_strdup (source),
+      strlen (source), g_free);
 
   auto context = Local<Context>::New (isolate, *self->context);
 
@@ -794,12 +830,13 @@ _gum_v8_script_load_module (GumV8Script * self,
   {
     g_hash_table_insert (program->es_assets, name_copy, asset);
 
-    gchar * source_map = gum_script_backend_extract_inline_source_map (source);
+    gchar * source_map = gum_source_map_try_extract_inline (source);
     if (source_map != NULL)
     {
       gchar * map_name = g_strconcat (name, ".map", NULL);
-      g_hash_table_insert (program->es_assets, map_name,
-          gum_es_asset_new_take (map_name, source_map, strlen (source_map)));
+      auto asset = gum_es_asset_new (map_name, source_map, strlen (source_map),
+          g_free);
+      g_hash_table_insert (program->es_assets, map_name, asset);
     }
   }
   else
@@ -818,7 +855,7 @@ _gum_v8_script_register_source_map (GumV8Script * self,
 {
   gchar * map_name = g_strconcat (name, ".map", NULL);
   g_hash_table_insert (self->program->es_assets, map_name,
-      gum_es_asset_new_take (map_name, source_map, strlen (source_map)));
+      gum_es_asset_new (map_name, source_map, strlen (source_map), g_free));
 }
 
 static MaybeLocal<Promise>
@@ -1088,8 +1125,7 @@ gum_ensure_module_defined (Isolate * isolate,
   g_hash_table_insert (program->es_modules,
       GINT_TO_POINTER (module->ScriptId ()), asset);
 
-  g_free (asset->data);
-  asset->data = NULL;
+  gum_es_asset_release_data (asset);
 
   return module;
 }
@@ -1102,6 +1138,8 @@ gum_v8_script_destroy_context (GumV8Script * self)
   {
     ScriptScope scope (self);
 
+    _gum_v8_profiler_dispose (&self->profiler);
+    _gum_v8_sampler_dispose (&self->sampler);
     _gum_v8_cloak_dispose (&self->cloak);
     _gum_v8_stalker_dispose (&self->stalker);
     _gum_v8_code_relocator_dispose (&self->code_relocator);
@@ -1114,12 +1152,14 @@ gum_v8_script_destroy_context (GumV8Script * self)
 #ifdef HAVE_SQLITE
     _gum_v8_database_dispose (&self->database);
 #endif
+#ifndef G_OS_NONE
     _gum_v8_socket_dispose (&self->socket);
     _gum_v8_stream_dispose (&self->stream);
+#endif
     _gum_v8_checksum_dispose (&self->checksum);
     _gum_v8_file_dispose (&self->file);
-    _gum_v8_thread_dispose (&self->thread);
     _gum_v8_process_dispose (&self->process);
+    _gum_v8_thread_dispose (&self->thread);
     _gum_v8_module_dispose (&self->module);
     _gum_v8_memory_dispose (&self->memory);
     _gum_v8_kernel_dispose (&self->kernel);
@@ -1135,6 +1175,8 @@ gum_v8_script_destroy_context (GumV8Script * self)
   delete self->context;
   self->context = nullptr;
 
+  _gum_v8_profiler_finalize (&self->profiler);
+  _gum_v8_sampler_finalize (&self->sampler);
   _gum_v8_cloak_finalize (&self->cloak);
   _gum_v8_stalker_finalize (&self->stalker);
   _gum_v8_code_relocator_finalize (&self->code_relocator);
@@ -1147,12 +1189,14 @@ gum_v8_script_destroy_context (GumV8Script * self)
 #ifdef HAVE_SQLITE
   _gum_v8_database_finalize (&self->database);
 #endif
+#ifndef G_OS_NONE
   _gum_v8_socket_finalize (&self->socket);
   _gum_v8_stream_finalize (&self->stream);
+#endif
   _gum_v8_checksum_finalize (&self->checksum);
   _gum_v8_file_finalize (&self->file);
-  _gum_v8_thread_finalize (&self->thread);
   _gum_v8_process_finalize (&self->process);
+  _gum_v8_thread_finalize (&self->thread);
   _gum_v8_module_finalize (&self->module);
   _gum_v8_memory_finalize (&self->memory);
   _gum_v8_kernel_finalize (&self->kernel);
@@ -1206,7 +1250,7 @@ gum_v8_script_do_load (GumScriptTask * task,
 
   self->state = GUM_SCRIPT_STATE_LOADING;
 
-  gum_v8_script_execute_entrypoints (self, task);
+  gum_v8_script_execute_runtime (self, task);
 
   return;
 
@@ -1221,18 +1265,45 @@ invalid_operation:
 }
 
 static void
+gum_v8_script_execute_runtime (GumV8Script * self,
+                               GumScriptTask * task)
+{
+  ScriptScope scope (self);
+  auto isolate = self->isolate;
+  auto context = isolate->GetCurrentContext ();
+  gum_es_program_load_runtime (self->program, isolate, context,
+      gum_v8_script_on_runtime_loaded, g_object_ref (task),
+      g_object_unref);
+}
+
+static void
+gum_v8_script_on_runtime_loaded (Local<Value> error,
+                                 gpointer user_data)
+{
+  auto task = (GumScriptTask *) user_data;
+  auto self = (GumV8Script *)
+      g_async_result_get_source_object (G_ASYNC_RESULT (task));
+
+  if (error->IsNull ())
+  {
+    gum_v8_script_execute_entrypoints (self, task);
+  }
+  else
+  {
+    _gum_v8_core_on_unhandled_exception (&self->core, error);
+    gum_v8_script_schedule_load_task_completion (self, task);
+  }
+
+  g_object_unref (self);
+}
+
+static void
 gum_v8_script_execute_entrypoints (GumV8Script * self,
                                    GumScriptTask * task)
 {
-  bool done;
   {
-    ScriptScope scope (self);
     auto isolate = self->isolate;
     auto context = isolate->GetCurrentContext ();
-
-    auto runtime = gum_v8_bundle_new (isolate, gumjs_runtime_modules);
-    gum_v8_bundle_run (runtime);
-    gum_v8_bundle_free (runtime);
 
     auto program = self->program;
     if (program->entrypoints != NULL)
@@ -1266,24 +1337,28 @@ gum_v8_script_execute_entrypoints (GumV8Script * self,
             ConstructorBehavior::kThrow)
           .ToLocalChecked ())
           .ToLocalChecked ();
-
-      done = false;
     }
     else
     {
       auto code = Local<Script>::New (isolate, *program->global_code);
-      auto result = code->Run (context);
-      _gum_v8_ignore_result (result);
 
-      done = true;
+      {
+        TryCatch trycatch (isolate);
+
+        auto result = code->Run (context);
+        _gum_v8_ignore_result (result);
+
+        if (trycatch.HasCaught ())
+        {
+          auto exception = trycatch.Exception ();
+          trycatch.Reset ();
+          _gum_v8_core_on_unhandled_exception (&self->core, exception);
+          trycatch.Reset ();
+        }
+      }
+
+      gum_v8_script_schedule_load_task_completion (self, task);
     }
-  }
-
-  if (done)
-  {
-    self->state = GUM_SCRIPT_STATE_LOADED;
-
-    gum_script_task_return_pointer (task, NULL, NULL);
   }
 }
 
@@ -1308,16 +1383,26 @@ gum_v8_script_on_entrypoints_executed (const FunctionCallbackInfo<Value> & info)
       _gum_v8_core_on_unhandled_exception (core, reason);
   }
 
+  gum_v8_script_schedule_load_task_completion (self, task);
+
+  g_object_unref (self);
+  g_object_unref (task);
+}
+
+static void
+gum_v8_script_schedule_load_task_completion (GumV8Script * self,
+                                             GumScriptTask * task)
+{
+  auto core = &self->core;
+
   auto source = g_idle_source_new ();
   g_source_set_callback (source, (GSourceFunc) gum_v8_script_complete_load_task,
-      task, g_object_unref);
+      g_object_ref (task), g_object_unref);
   g_source_attach (source,
       gum_script_scheduler_get_js_context (core->scheduler));
   g_source_unref (source);
 
   _gum_v8_core_pin (core);
-
-  g_object_unref (self);
 }
 
 static gboolean
@@ -1422,10 +1507,14 @@ gum_v8_script_try_unload (GumV8Script * self)
   {
     ScriptScope scope (self);
 
+    _gum_v8_profiler_flush (&self->profiler);
+    _gum_v8_sampler_flush (&self->sampler);
     _gum_v8_stalker_flush (&self->stalker);
     _gum_v8_interceptor_flush (&self->interceptor);
+#ifndef G_OS_NONE
     _gum_v8_socket_flush (&self->socket);
     _gum_v8_stream_flush (&self->stream);
+#endif
     _gum_v8_process_flush (&self->process);
     success = _gum_v8_core_flush (&self->core, gum_v8_script_try_unload);
   }
@@ -1970,6 +2059,18 @@ gum_es_program_new (void)
       (GDestroyNotify) gum_es_asset_unref);
   program->es_modules = g_hash_table_new (NULL, NULL);
 
+  for (auto cur = gumjs_runtime_modules; cur->name != NULL; cur++)
+  {
+    auto name = g_strconcat ("/frida/runtime/", cur->name, NULL);
+    auto asset = gum_es_asset_new (name, cur->source_code,
+        strlen (cur->source_code), NULL);
+
+    if (program->runtime == NULL)
+      program->runtime = asset;
+
+    g_hash_table_insert (program->es_assets, name, asset);
+  }
+
   return program;
 }
 
@@ -1989,10 +2090,87 @@ gum_es_program_free (GumESProgram * program)
   g_slice_free (GumESProgram, program);
 }
 
+static void
+gum_es_program_load_runtime (GumESProgram * self,
+                             Isolate * isolate,
+                             Local<Context> context,
+                             GumRuntimeLoadedFunc func,
+                             gpointer data,
+                             GDestroyNotify data_destroy)
+{
+  Local<Module> module;
+  bool success;
+  {
+    TryCatch trycatch (isolate);
+    auto result =
+        gum_ensure_module_defined (isolate, context, self->runtime, self);
+    success = result.ToLocal (&module);
+    if (success)
+    {
+      auto instantiate_result =
+          module->InstantiateModule (context, gum_resolve_module);
+      if (!instantiate_result.To (&success))
+        success = false;
+    }
+
+    if (!success)
+    {
+      func (trycatch.Exception (), data);
+      if (data_destroy != NULL)
+        data_destroy (data);
+      return;
+    }
+  }
+
+  auto promise = module->Evaluate (context).ToLocalChecked ().As<Promise> ();
+
+  auto d = g_slice_new (GumLoadRuntimeData);
+  d->func = func;
+  d->data = data;
+  d->data_destroy = data_destroy;
+
+  auto data_val = External::New (isolate, d);
+
+  auto on_success = Function::New (context,
+      gum_es_program_on_runtime_load_success, data_val, 1,
+      ConstructorBehavior::kThrow).ToLocalChecked ();
+  auto on_failure = Function::New (context,
+      gum_es_program_on_runtime_load_failure, data_val, 1,
+      ConstructorBehavior::kThrow).ToLocalChecked ();
+
+  promise->Then (context, on_success, on_failure).ToLocalChecked ();
+}
+
+static void
+gum_es_program_on_runtime_load_success (const FunctionCallbackInfo<Value> & info)
+{
+  gum_es_program_on_runtime_loaded (info, Null (info.GetIsolate ()));
+}
+
+static void
+gum_es_program_on_runtime_load_failure (const FunctionCallbackInfo<Value> & info)
+{
+  gum_es_program_on_runtime_loaded (info, info[0]);
+}
+
+static void
+gum_es_program_on_runtime_loaded (const FunctionCallbackInfo<Value> & info,
+                                  Local<Value> error)
+{
+  auto d = (GumLoadRuntimeData *) info.Data ().As<External> ()->Value ();
+
+  d->func (error, d->data);
+
+  if (d->data_destroy != NULL)
+    d->data_destroy (d->data);
+  g_slice_free (GumLoadRuntimeData, d);
+}
+
 static GumESAsset *
-gum_es_asset_new_take (const gchar * name,
-                       gpointer data,
-                       gsize data_size)
+gum_es_asset_new (const gchar * name,
+                  gconstpointer data,
+                  gsize data_size,
+                  GDestroyNotify data_destroy)
 {
   auto asset = g_slice_new (GumESAsset);
 
@@ -2002,6 +2180,7 @@ gum_es_asset_new_take (const gchar * name,
 
   asset->data = data;
   asset->data_size = data_size;
+  asset->data_destroy = data_destroy;
 
   asset->module = nullptr;
 
@@ -2026,9 +2205,21 @@ gum_es_asset_unref (GumESAsset * asset)
     return;
 
   delete asset->module;
-  g_free (asset->data);
+
+  gum_es_asset_release_data (asset);
 
   g_slice_free (GumESAsset, asset);
+}
+
+static void
+gum_es_asset_release_data (GumESAsset * asset)
+{
+  if (asset->data == NULL)
+    return;
+
+  if (asset->data_destroy != NULL)
+    asset->data_destroy ((gpointer) asset->data);
+  asset->data = NULL;
 }
 
 static std::unique_ptr<StringBuffer>

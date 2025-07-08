@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2010-2022 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2010-2025 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  * Copyright (C) 2020 Matt Oh <oh.jeongwook@gmail.com>
  * Copyright (C) 2024 Francesco Tamagni <mrmacete@protonmail.ch>
  *
@@ -9,25 +9,23 @@
 #include "gumsymbolutil.h"
 
 #include "gum-init.h"
-#include "gumdarwinsymbolicator.h"
+#include "gum/gumdarwinsymbolicator.h"
 
 #include <mach-o/dyld.h>
 
-#ifndef GUM_DIET
+#include <capstone.h>
+#if defined (HAVE_I386)
+# include "gumx86reader.h"
+#elif defined (HAVE_ARM64)
+# include "gumarm64reader.h"
+#endif
 
-# include <capstone.h>
-# if defined (HAVE_I386)
-#  include "gumx86reader.h"
-# elif defined (HAVE_ARM64)
-#  include "gumarm64reader.h"
-# endif
-
-# define GUM_TYPE_SYMBOL_CACHE_INVALIDATOR \
+#define GUM_TYPE_SYMBOL_CACHE_INVALIDATOR \
     (gum_symbol_cache_invalidator_get_type ())
-GUM_DECLARE_FINAL_TYPE (GumSymbolCacheInvalidator,
-                        gum_symbol_cache_invalidator,
-                        GUM, SYMBOL_CACHE_INVALIDATOR,
-                        GObject)
+G_DECLARE_FINAL_TYPE (GumSymbolCacheInvalidator,
+                      gum_symbol_cache_invalidator,
+                      GUM, SYMBOL_CACHE_INVALIDATOR,
+                      GObject)
 
 struct _GumSymbolCacheInvalidator
 {
@@ -37,13 +35,11 @@ struct _GumSymbolCacheInvalidator
 };
 
 static void do_deinit (void);
-#endif
 
 static GArray * gum_pointer_array_new_empty (void);
 static GArray * gum_pointer_array_new_take_addresses (GumAddress * addresses,
     gsize len);
 
-#ifndef GUM_DIET
 static void gum_symbol_cache_invalidator_iface_init (gpointer g_iface,
     gpointer iface_data);
 static void gum_symbol_cache_invalidator_dispose (GObject * object);
@@ -66,14 +62,12 @@ G_DEFINE_TYPE_EXTENDED (GumSymbolCacheInvalidator,
                         0,
                         G_IMPLEMENT_INTERFACE (GUM_TYPE_INVOCATION_LISTENER,
                             gum_symbol_cache_invalidator_iface_init))
-#endif
 
 static GumDarwinSymbolicator *
 gum_try_obtain_symbolicator (void)
 {
   GumDarwinSymbolicator * result = NULL;
 
-#ifndef GUM_DIET
   G_LOCK (symbolicator);
 
   if (symbolicator == NULL)
@@ -95,12 +89,9 @@ gum_try_obtain_symbolicator (void)
   G_UNLOCK (symbolicator);
 
   invalidator_initialized = TRUE;
-#endif
 
   return result;
 }
-
-#ifndef GUM_DIET
 
 static void
 do_deinit (void)
@@ -117,8 +108,6 @@ do_deinit (void)
   G_UNLOCK (symbolicator);
 }
 
-#endif
-
 gboolean
 gum_symbol_details_from_address (gpointer address,
                                  GumDebugSymbolDetails * details)
@@ -132,7 +121,7 @@ gum_symbol_details_from_address (gpointer address,
   success = gum_darwin_symbolicator_details_from_address (symbolicator,
       GUM_ADDRESS (address), details);
 
-  gum_object_unref (symbolicator);
+  g_object_unref (symbolicator);
 
   return success;
 }
@@ -149,7 +138,7 @@ gum_symbol_name_from_address (gpointer address)
   name = gum_darwin_symbolicator_name_from_address (symbolicator,
       GUM_ADDRESS (address));
 
-  gum_object_unref (symbolicator);
+  g_object_unref (symbolicator);
 
   return name;
 }
@@ -166,7 +155,7 @@ gum_find_function (const gchar * name)
   address = GSIZE_TO_POINTER (
       gum_darwin_symbolicator_find_function (symbolicator, name));
 
-  gum_object_unref (symbolicator);
+  g_object_unref (symbolicator);
 
   return address;
 }
@@ -184,7 +173,7 @@ gum_find_functions_named (const gchar * name)
   addresses =
       gum_darwin_symbolicator_find_functions_named (symbolicator, name, &len);
 
-  gum_object_unref (symbolicator);
+  g_object_unref (symbolicator);
 
   return gum_pointer_array_new_take_addresses (addresses, len);
 }
@@ -202,7 +191,7 @@ gum_find_functions_matching (const gchar * str)
   addresses =
       gum_darwin_symbolicator_find_functions_matching (symbolicator, str, &len);
 
-  gum_object_unref (symbolicator);
+  g_object_unref (symbolicator);
 
   return gum_pointer_array_new_take_addresses (addresses, len);
 }
@@ -238,8 +227,6 @@ gum_pointer_array_new_take_addresses (GumAddress * addresses,
 
   return result;
 }
-
-#ifndef GUM_DIET
 
 static void
 gum_symbol_cache_invalidator_class_init (GumSymbolCacheInvalidatorClass * klass)
@@ -296,7 +283,8 @@ gum_symbol_cache_invalidator_init (GumSymbolCacheInvalidator * self)
 
     gum_interceptor_attach (self->interceptor,
         (gpointer) (notification_impl + offset),
-        GUM_INVOCATION_LISTENER (self), NULL);
+        GUM_INVOCATION_LISTENER (self), NULL,
+        GUM_ATTACH_FLAGS_UNIGNORABLE);
   }
   else if (g_once_init_enter (&registered))
   {
@@ -353,5 +341,3 @@ gum_clear_symbolicator_object (void)
 
   G_UNLOCK (symbolicator);
 }
-
-#endif

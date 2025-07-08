@@ -1,25 +1,23 @@
 /*
- * Copyright (C) 2010-2024 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2010-2025 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  * Copyright (C)      2019 Jon Wilson <jonwilson@zepler.net>
  * Copyright (C)      2021 Paul Schmidt <p.schmidt@tu-bs.de>
  *
  * Licence: wxWindows Library Licence, Version 3.1
  */
 
-#ifndef GUM_DIET
-
 #include "gumelfmodule.h"
 
 #include "gumelfmodule-priv.h"
-#ifdef HAVE_ANDROID
-# include "backend-linux/gumandroid.h"
-# ifdef HAVE_MINIZIP
-#  include <minizip/mz.h>
-#  include <minizip/mz_strm.h>
-#  include <minizip/mz_strm_os.h>
-#  include <minizip/mz_zip.h>
-#  include <minizip/mz_zip_rw.h>
-# endif
+#ifdef HAVE_LZMA
+# include <lzma.h>
+#endif
+#if defined (HAVE_ANDROID) && defined (HAVE_MINIZIP)
+# include <minizip/mz.h>
+# include <minizip/mz_strm.h>
+# include <minizip/mz_strm_os.h>
+# include <minizip/mz_zip.h>
+# include <minizip/mz_zip_rw.h>
 #endif
 
 #include <string.h>
@@ -27,6 +25,9 @@
 #define GUM_ELF_DEFAULT_MAPPED_SIZE (64 * 1024)
 #define GUM_ELF_PAGE_START(value, page_size) \
     (GUM_ADDRESS (value) & ~GUM_ADDRESS (page_size - 1))
+
+#define GUM_ELF_MODULE_LOCK(o) g_mutex_lock (&(o)->mutex)
+#define GUM_ELF_MODULE_UNLOCK(o) g_mutex_unlock (&(o)->mutex)
 
 #define GUM_CHECK_BOUNDS(l, r, name) \
     G_STMT_START \
@@ -82,6 +83,7 @@ struct _GumElfModule
   GBytes * file_bytes;
   gconstpointer file_data;
   gsize file_size;
+  GumMemoryRange file_mapped_range;
 
   GumElfEhdr ehdr;
   GArray * phdrs;
@@ -95,6 +97,11 @@ struct _GumElfModule
   guint64 mapped_size;
   GumElfDynamicAddressState dynamic_address_state;
   const gchar * dynamic_strings;
+
+  GMutex mutex;
+
+  GumElfModule * fallback_elf_module;
+  gboolean attempted_fallback_load;
 };
 
 enum _GumElfDynamicAddressState
@@ -155,6 +162,7 @@ struct _GumElfEnumerateDepsContext
   GumElfModule * module;
 };
 
+static void gum_elf_module_dispose (GObject * object);
 static void gum_elf_module_finalize (GObject * object);
 static void gum_elf_module_get_property (GObject * object,
     guint property_id, GValue * value, GParamSpec * pspec);
@@ -175,6 +183,10 @@ static gboolean gum_elf_module_load_dynamic_entries (GumElfModule * self,
 static gconstpointer gum_elf_module_get_live_data (GumElfModule * self,
     gsize * size);
 static void gum_elf_module_unload (GumElfModule * self);
+static GumElfModule * gum_elf_module_try_get_fallback_elf_module (
+    GumElfModule * self);
+static gboolean gum_try_load_debugdata_as_fallback_module (
+    const GumElfSectionDetails * details, gpointer user_data);
 static gboolean gum_elf_module_emit_relocations (GumElfModule * self,
     const GumElfRelocationGroup * g, GumFoundElfRelocationFunc func,
     gpointer user_data);
@@ -238,6 +250,8 @@ static gint64 gum_elf_module_read_int64 (GumElfModule * self, const gint64 * v);
 static guint64 gum_elf_module_read_uint64 (GumElfModule * self,
     const guint64 * v);
 
+static GBytes * gum_decompress_xz (gconstpointer data, gsize size);
+
 static gboolean gum_maybe_extract_from_apk (const gchar * path,
     GBytes ** file_bytes);
 
@@ -248,6 +262,7 @@ gum_elf_module_class_init (GumElfModuleClass * klass)
 {
   GObjectClass * object_class = G_OBJECT_CLASS (klass);
 
+  object_class->dispose = gum_elf_module_dispose;
   object_class->finalize = gum_elf_module_finalize;
   object_class->get_property = gum_elf_module_get_property;
   object_class->set_property = gum_elf_module_set_property;
@@ -312,6 +327,8 @@ gum_elf_module_class_init (GumElfModuleClass * klass)
 static void
 gum_elf_module_init (GumElfModule * self)
 {
+  self->source_mode = GUM_ELF_SOURCE_MODE_OFFLINE;
+
   self->phdrs = g_array_new (FALSE, FALSE, sizeof (GumElfPhdr));
   self->shdrs = g_array_new (FALSE, FALSE, sizeof (GumElfShdr));
   self->dyns = g_array_new (FALSE, FALSE, sizeof (GumElfDyn));
@@ -321,6 +338,21 @@ gum_elf_module_init (GumElfModule * self)
       (GDestroyNotify) gum_elf_section_details_clear);
 
   self->mapped_size = GUM_ELF_DEFAULT_MAPPED_SIZE;
+  self->dynamic_address_state = GUM_ELF_DYNAMIC_ADDRESS_PRISTINE;
+
+  g_mutex_init (&self->mutex);
+}
+
+static void
+gum_elf_module_dispose (GObject * object)
+{
+  GumElfModule * self = GUM_ELF_MODULE (object);
+
+  g_clear_object (&self->fallback_elf_module);
+
+  gum_elf_module_unload (self);
+
+  G_OBJECT_CLASS (gum_elf_module_parent_class)->dispose (object);
 }
 
 static void
@@ -328,7 +360,7 @@ gum_elf_module_finalize (GObject * object)
 {
   GumElfModule * self = GUM_ELF_MODULE (object);
 
-  gum_elf_module_unload (self);
+  g_mutex_clear (&self->mutex);
 
   g_array_unref (self->sections);
 
@@ -513,12 +545,32 @@ gum_elf_module_load (GumElfModule * self,
 #endif
     if (!gum_maybe_extract_from_apk (self->source_path, &self->file_bytes))
     {
-      GMappedFile * file =
-          g_mapped_file_new (self->source_path, FALSE, &local_error);
-      if (file == NULL)
-        goto unable_to_open;
-      self->file_bytes = g_mapped_file_get_bytes (file);
-      g_mapped_file_unref (file);
+      GMappedFile * file;
+      gconstpointer data;
+      gsize size;
+      GumMemoryRange r;
+
+      file = g_mapped_file_new (self->source_path, FALSE, &local_error);
+      if (file != NULL)
+      {
+        self->file_bytes = g_mapped_file_get_bytes (file);
+        g_mapped_file_unref (file);
+
+        data = g_bytes_get_data (self->file_bytes, &size);
+        r.base_address = GUM_ADDRESS (data);
+        r.size = GUM_ALIGN_SIZE (size, gum_query_page_size ());
+        gum_cloak_add_range (&r);
+        self->file_mapped_range = r;
+      }
+      else
+      {
+        if (self->source_mode == GUM_ELF_SOURCE_MODE_OFFLINE)
+          goto unable_to_open;
+
+        self->file_bytes = g_bytes_new_static (
+            GSIZE_TO_POINTER (self->base_address),
+            G_MAXSIZE - self->base_address);
+      }
     }
   }
 
@@ -887,7 +939,9 @@ gum_elf_module_load_section_details (GumElfModule * self,
     d->name = name;
     d->type = shdr->type;
     d->flags = shdr->flags;
-    d->address = gum_elf_module_translate_to_online (self, shdr->addr);
+    d->address = ((shdr->flags & GUM_ELF_SECTION_FLAG_ALLOC) != 0)
+        ? gum_elf_module_translate_to_online (self, shdr->addr)
+        : shdr->addr;
     d->offset = shdr->offset;
     d->size = shdr->size;
     d->link = shdr->link;
@@ -1033,10 +1087,68 @@ gum_elf_module_unload (GumElfModule * self)
   g_array_set_size (self->phdrs, 0);
   memset (&self->ehdr, 0, sizeof (self->ehdr));
 
+  if (self->file_mapped_range.base_address != 0)
+  {
+    gum_cloak_remove_range (&self->file_mapped_range);
+    self->file_mapped_range.base_address = 0;
+    self->file_mapped_range.size = 0;
+  }
   g_bytes_unref (self->file_bytes);
   self->file_bytes = NULL;
   self->file_data = NULL;
   self->file_size = 0;
+}
+
+static GumElfModule *
+gum_elf_module_try_get_fallback_elf_module (GumElfModule * self)
+{
+  GUM_ELF_MODULE_LOCK (self);
+
+  if (!self->attempted_fallback_load)
+  {
+    self->attempted_fallback_load = TRUE;
+
+    if (self->source_mode == GUM_ELF_SOURCE_MODE_ONLINE)
+    {
+      self->fallback_elf_module =
+          gum_elf_module_new_from_file (self->source_path, NULL);
+    }
+    else
+    {
+      gum_elf_module_enumerate_sections (self,
+          gum_try_load_debugdata_as_fallback_module, self);
+    }
+
+    if (self->fallback_elf_module != NULL)
+      self->fallback_elf_module->base_address = self->base_address;
+  }
+
+  GUM_ELF_MODULE_UNLOCK (self);
+
+  return self->fallback_elf_module;
+}
+
+static gboolean
+gum_try_load_debugdata_as_fallback_module (const GumElfSectionDetails * details,
+                                           gpointer user_data)
+{
+  GumElfModule * self = user_data;
+  GBytes * debugdata;
+
+  if (strcmp (details->name, ".gnu_debugdata") != 0)
+    return TRUE;
+
+  debugdata = gum_decompress_xz (
+      (const guint8 *) gum_elf_module_get_file_data (self, NULL) +
+        details->offset,
+      details->size);
+  if (debugdata != NULL)
+  {
+    self->fallback_elf_module = gum_elf_module_new_from_blob (debugdata, NULL);
+    g_bytes_unref (debugdata);
+  }
+
+  return FALSE;
 }
 
 GumElfType
@@ -1508,8 +1620,8 @@ gum_emit_elf_import (const GumElfSymbolDetails * details,
     GumImportDetails d;
 
     d.type = (details->type == GUM_ELF_SYMBOL_FUNC)
-        ? GUM_EXPORT_FUNCTION
-        : GUM_EXPORT_VARIABLE;
+        ? GUM_IMPORT_FUNCTION
+        : GUM_IMPORT_VARIABLE;
     d.name = details->name;
     d.module = NULL;
     d.address = 0;
@@ -1575,31 +1687,6 @@ gum_elf_module_enumerate_exports (GumElfModule * self,
                                   gpointer user_data)
 {
   GumElfEnumerateExportsContext ctx;
-
-#ifdef HAVE_ANDROID
-  if (self->source_path != NULL &&
-      gum_android_is_linker_module_name (self->source_path))
-  {
-    const gchar ** magic_exports;
-    guint i;
-
-    magic_exports = gum_android_get_magic_linker_export_names ();
-
-    for (i = 0; magic_exports[i] != NULL; i++)
-    {
-      const gchar * name = magic_exports[i];
-      GumExportDetails d;
-
-      d.type = GUM_EXPORT_FUNCTION;
-      d.name = name;
-      d.address = gum_module_find_export_by_name (self->source_path, name);
-      g_assert (d.address != 0);
-
-      if (!func (&d, user_data))
-        return;
-    }
-  }
-#endif
 
   ctx.func = func;
   ctx.user_data = user_data;
@@ -1900,7 +1987,7 @@ gum_elf_module_enumerate_symbols_in_section (GumElfModule * self,
 
   shdr = gum_elf_module_find_section_header_by_type (self, section);
   if (shdr == NULL)
-    return;
+    goto consider_fallback;
 
   strings_shdr =
       gum_elf_module_find_section_header_by_index (self, shdr->link);
@@ -1939,6 +2026,16 @@ gum_elf_module_enumerate_symbols_in_section (GumElfModule * self,
 
 propagate_error:
   return;
+
+consider_fallback:
+  {
+    GumElfModule * fallback = gum_elf_module_try_get_fallback_elf_module (self);
+    if (fallback != NULL)
+    {
+      gum_elf_module_enumerate_symbols_in_section (fallback, section, func,
+          user_data);
+    }
+  }
 }
 
 void
@@ -2300,7 +2397,8 @@ gum_elf_module_check_str_bounds (GumElfModule * self,
 consider_file_data:
   {
     if (self->source_mode == GUM_ELF_SOURCE_MODE_ONLINE &&
-        GUM_ADDRESS (base) == self->base_address)
+        GUM_ADDRESS (base) == self->base_address &&
+        base != self->file_data)
     {
       return gum_elf_module_check_str_bounds (self, str, self->file_data,
           self->file_size, name, error);
@@ -2327,45 +2425,105 @@ static guint16
 gum_elf_module_read_uint16 (GumElfModule * self,
                             const guint16 * v)
 {
+  guint16 aligned_val;
+
+  memcpy (&aligned_val, v, sizeof (aligned_val));
+
   return (self->ehdr.identity.data_encoding == GUM_ELF_DATA_ENCODING_LSB)
-      ? GUINT16_FROM_LE (*v)
-      : GUINT16_FROM_BE (*v);
+      ? GUINT16_FROM_LE (aligned_val)
+      : GUINT16_FROM_BE (aligned_val);
 }
 
 static gint32
 gum_elf_module_read_int32 (GumElfModule * self,
                            const gint32 * v)
 {
+  gint32 aligned_val;
+
+  memcpy (&aligned_val, v, sizeof (aligned_val));
+
   return (self->ehdr.identity.data_encoding == GUM_ELF_DATA_ENCODING_LSB)
-      ? GINT32_FROM_LE (*v)
-      : GINT32_FROM_BE (*v);
+      ? GINT32_FROM_LE (aligned_val)
+      : GINT32_FROM_BE (aligned_val);
 }
 
 static guint32
 gum_elf_module_read_uint32 (GumElfModule * self,
                             const guint32 * v)
 {
+  guint32 aligned_val;
+
+  memcpy (&aligned_val, v, sizeof (aligned_val));
+
   return (self->ehdr.identity.data_encoding == GUM_ELF_DATA_ENCODING_LSB)
-      ? GUINT32_FROM_LE (*v)
-      : GUINT32_FROM_BE (*v);
+      ? GUINT32_FROM_LE (aligned_val)
+      : GUINT32_FROM_BE (aligned_val);
 }
 
 static gint64
 gum_elf_module_read_int64 (GumElfModule * self,
                            const gint64 * v)
 {
+  gint64 aligned_val;
+
+  memcpy (&aligned_val, v, sizeof (aligned_val));
+
   return (self->ehdr.identity.data_encoding == GUM_ELF_DATA_ENCODING_LSB)
-      ? GINT64_FROM_LE (*v)
-      : GINT64_FROM_BE (*v);
+      ? GINT64_FROM_LE (aligned_val)
+      : GINT64_FROM_BE (aligned_val);
 }
 
 static guint64
 gum_elf_module_read_uint64 (GumElfModule * self,
                             const guint64 * v)
 {
+  guint64 aligned_val;
+
+  memcpy (&aligned_val, v, sizeof (aligned_val));
+
   return (self->ehdr.identity.data_encoding == GUM_ELF_DATA_ENCODING_LSB)
-      ? GUINT64_FROM_LE (*v)
-      : GUINT64_FROM_BE (*v);
+      ? GUINT64_FROM_LE (aligned_val)
+      : GUINT64_FROM_BE (aligned_val);
+}
+
+static GBytes *
+gum_decompress_xz (gconstpointer data,
+                   gsize size)
+{
+#ifdef HAVE_LZMA
+  gpointer out_data;
+  gsize out_capacity;
+  size_t in_pos, out_pos;
+
+  out_capacity = 4 * size;
+  out_data = g_malloc (out_capacity);
+
+  in_pos = 0;
+  out_pos = 0;
+
+  while (TRUE)
+  {
+    uint64_t memlimit = UINT64_MAX;
+    uint32_t flags = 0;
+
+    switch (lzma_stream_buffer_decode (&memlimit, flags, NULL, data, &in_pos,
+          size, out_data, &out_pos, out_capacity))
+    {
+      case LZMA_OK:
+        out_data = g_realloc (out_data, out_pos);
+        return g_bytes_new_take (out_data, out_pos);
+      case LZMA_BUF_ERROR:
+        out_capacity *= 2;
+        out_data = g_realloc (out_data, out_capacity);
+        break;
+      default:
+        g_free (out_data);
+        return NULL;
+    }
+  }
+#else
+  return NULL;
+#endif
 }
 
 static gboolean
@@ -2419,5 +2577,3 @@ beach:
   return FALSE;
 #endif
 }
-
-#endif

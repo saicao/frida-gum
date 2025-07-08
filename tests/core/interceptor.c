@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2008-2022 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2008-2025 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  * Copyright (C) 2008 Christian Berentsen <jc.berentsen@gmail.com>
  *
  * Licence: wxWindows Library Licence, Version 3.1
@@ -96,7 +96,7 @@ TESTCASE (attach_two)
   g_assert_cmpstr (fixture->result->str, ==, "ac|bd");
 }
 
-void GUM_NOINLINE
+GUM_HOOK_TARGET static void
 recursive_function (GString * str,
                     gint count)
 {
@@ -129,7 +129,7 @@ TESTCASE (attach_to_pthread_key_create)
   pthread_key_t key;
 
   pthread_key_create_impl = GSIZE_TO_POINTER (
-      gum_module_find_export_by_name (NULL, "pthread_key_create"));
+      gum_module_find_global_export_by_name ("pthread_key_create"));
 
   interceptor_fixture_attach (fixture, 0, pthread_key_create_impl, '>', '<');
 
@@ -178,7 +178,8 @@ TESTCASE (attach_to_own_api)
   listener->user_data = fixture->result;
 
   gum_interceptor_attach (fixture->interceptor, target_function,
-      GUM_INVOCATION_LISTENER (listener), NULL);
+      GUM_INVOCATION_LISTENER (listener), NULL,
+      GUM_ATTACH_FLAGS_NONE);
   target_function (fixture->result);
   gum_interceptor_detach (fixture->interceptor,
       GUM_INVOCATION_LISTENER (listener));
@@ -209,7 +210,8 @@ TESTCASE (attach_detach_torture)
     listener = test_callback_listener_new ();
 
     gum_interceptor_attach (fixture->interceptor, target_function,
-        GUM_INVOCATION_LISTENER (listener), NULL);
+        GUM_INVOCATION_LISTENER (listener), NULL,
+        GUM_ATTACH_FLAGS_NONE);
     gum_interceptor_detach (fixture->interceptor,
         GUM_INVOCATION_LISTENER (listener));
     interceptor_fixture_detach (fixture, 0);
@@ -383,9 +385,11 @@ TESTCASE (function_data)
       g_object_new (TEST_TYPE_FUNCTION_DATA_LISTENER, NULL);
   listener = GUM_INVOCATION_LISTENER (fd_listener);
   g_assert_cmpint (gum_interceptor_attach (fixture->interceptor,
-      target_nop_function_a, listener, a_data), ==, GUM_ATTACH_OK);
+      target_nop_function_a, listener, a_data, GUM_ATTACH_FLAGS_NONE),
+      ==, GUM_ATTACH_OK);
   g_assert_cmpint (gum_interceptor_attach (fixture->interceptor,
-      target_nop_function_b, listener, b_data), ==, GUM_ATTACH_OK);
+      target_nop_function_b, listener, b_data, GUM_ATTACH_FLAGS_NONE),
+      ==, GUM_ATTACH_OK);
 
   g_assert_cmpuint (fd_listener->on_enter_call_count, ==, 0);
   g_assert_cmpuint (fd_listener->on_leave_call_count, ==, 0);
@@ -530,7 +534,7 @@ TESTCASE (already_attached)
   g_assert_cmpint (gum_interceptor_attach (fixture->interceptor,
       target_function, GUM_INVOCATION_LISTENER (
           fixture->listener_context[0]->listener),
-      NULL), ==, GUM_ATTACH_ALREADY_ATTACHED);
+      NULL, GUM_ATTACH_FLAGS_NONE), ==, GUM_ATTACH_ALREADY_ATTACHED);
 }
 
 TESTCASE (relative_proxy_function)
@@ -886,7 +890,8 @@ TESTCASE (attach_then_replace_fast)
   listener->user_data = fixture->result;
 
   g_assert_cmpint (gum_interceptor_attach (fixture->interceptor,
-        target_function, GUM_INVOCATION_LISTENER (listener), NULL),
+        target_function, GUM_INVOCATION_LISTENER (listener), NULL,
+        GUM_ATTACH_FLAGS_NONE),
       ==, GUM_ATTACH_OK);
   g_assert_cmpint (gum_interceptor_replace_fast (fixture->interceptor,
         target_function, replacement_target_function, NULL),
@@ -922,7 +927,8 @@ TESTCASE (replace_fast_then_attach)
       ==, GUM_REPLACE_OK);
 
   g_assert_cmpint (gum_interceptor_attach (fixture->interceptor,
-        target_function, GUM_INVOCATION_LISTENER (listener), NULL),
+        target_function, GUM_INVOCATION_LISTENER (listener), NULL,
+        GUM_ATTACH_FLAGS_NONE),
       ==, GUM_ATTACH_WRONG_TYPE);
 
   gum_interceptor_revert (fixture->interceptor, target_function);
@@ -999,6 +1005,12 @@ TESTCASE (fast_interceptor_performance)
   GTimer * timer;
   gpointer result;
   gdouble duration_default, duration_fast;
+
+  if (!g_test_slow ())
+  {
+    g_print ("<skipping, run in slow mode> ");
+    return;
+  }
 
   timer = g_timer_new ();
 

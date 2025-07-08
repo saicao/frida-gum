@@ -6,6 +6,7 @@ gum_prof_headers = [
   'gumprofiler.h',
   'gumprofilereport.h',
   'gumsampler.h',
+  'gumusertimesampler.h',
   'gumwallclocksampler.h',
 ]
 
@@ -25,7 +26,11 @@ if host_cpu_is_intel and host_os_family != 'qnx'
 endif
 
 if host_os_family == 'windows'
+  if not host_cpu_is_intel
+    gum_prof_sources += 'gumcyclesampler-windows.c'
+  endif
   gum_prof_sources += 'gumbusycyclesampler-windows.c'
+  gum_prof_sources += 'gumusertimesampler-windows.c'
 endif
 
 if host_os_family == 'darwin'
@@ -33,6 +38,7 @@ if host_os_family == 'darwin'
   if not host_cpu_is_intel
     gum_prof_sources += 'gumcyclesampler-darwin.c'
   endif
+  gum_prof_sources += 'gumusertimesampler-darwin.c'
 endif
 
 if host_os_family == 'linux'
@@ -40,6 +46,7 @@ if host_os_family == 'linux'
   if not host_cpu_is_intel
     gum_prof_sources += 'gumcyclesampler-linux.c'
   endif
+  gum_prof_sources += 'gumusertimesampler-linux.c'
 endif
 
 if host_os_family == 'freebsd'
@@ -47,16 +54,26 @@ if host_os_family == 'freebsd'
   if not host_cpu_is_intel
     gum_prof_sources += 'gumcyclesampler-freebsd.c'
   endif
+  gum_prof_sources += 'gumusertimesampler-freebsd.c'
 endif
 
 if host_os_family == 'qnx'
   gum_prof_sources += [
     'gumbusycyclesampler-qnx.c',
     'gumcyclesampler-qnx.c',
+    'gumusertimesampler-qnx.c',
   ]
 endif
 
-install_headers(gum_prof_headers, subdir: install_header_subdir + '/prof')
+if host_os_family == 'none'
+  gum_prof_sources += [
+    'gumbusycyclesampler-barebone.c',
+    'gumcyclesampler-barebone.c',
+    'gumusertimesampler-barebone.c',
+  ]
+endif
+
+install_headers(gum_prof_headers, subdir: install_header_subdir / 'prof')
 
 gum_prof = library('frida-gum-prof-' + api_version, gum_prof_sources,
   c_args: frida_component_cflags,
@@ -70,7 +87,7 @@ gum_prof_dep = declare_dependency(link_with: gum_prof)
 pkg = import('pkgconfig')
 pkg.generate(filebase: 'frida-gum-prof-' + api_version,
   name: 'GumProf',
-  version: gum_version,
+  version: frida_version,
   description: 'Profiling library built on top of Gum',
   requires: ['frida-gum-' + api_version],
   subdirs: install_header_basedir,

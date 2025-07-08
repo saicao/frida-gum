@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2024 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2014-2025 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  * Copyright (C) 2017 Antonio Ken Iannillo <ak.iannillo@gmail.com>
  * Copyright (C) 2019 John Coates <john@johncoates.dev>
  * Copyright (C) 2023 Håvard Sørbø <havard@hsorbo.no>
@@ -10,9 +10,6 @@
  * Licence: wxWindows Library Licence, Version 3.1
  */
 
-#include "capstone.h"
-#ifndef GUM_DIET
-
 #include "gumstalker.h"
 
 #include "gumarm64reader.h"
@@ -22,6 +19,7 @@
 #include "gummemory.h"
 #include "gummetalhash.h"
 #include "gumspinlock.h"
+#include "gumstalker-priv.h"
 #ifdef HAVE_LINUX
 # include "gum-init.h"
 # include "guminterceptor.h"
@@ -29,7 +27,6 @@
 
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 #ifdef HAVE_LINUX
 # include <unwind.h>
 # include <sys/syscall.h>
@@ -49,8 +46,12 @@
 #define GUM_INVALIDATE_TRAMPOLINE_MAX_SIZE 40
 #define GUM_RESTORATION_PROLOG_SIZE        4
 #define GUM_EXCLUSIVE_ACCESS_MAX_DEPTH     8
-#define GUM_MINIMAL_QREG_SIZE              14
-#define GUM_IC_MAGIC_EMPTY                 0xbaadd00ddeadface
+
+#if defined (__LP64__) || defined (_WIN64)
+# define GUM_IC_MAGIC_EMPTY         G_GUINT64_CONSTANT (0xbaadd00ddeadface)
+#else
+# define GUM_IC_MAGIC_EMPTY         0xbaadd00dU
+#endif
 
 #define GUM_INSTRUCTION_OFFSET_NONE (-1)
 
@@ -222,7 +223,7 @@ struct _GumExecCtx
   gboolean unfollow_called_while_still_following;
   GumExecBlock * current_block;
   gpointer pending_return_location;
-  guint pending_calls;
+  gsize pending_calls;
 
   gpointer resume_at;
   gpointer return_at;
@@ -257,7 +258,7 @@ struct _GumExecCtx
    * CALL/RET instructions, so we instead keep a count of the depth of the stack
    * here when GUM_CALL or GUM_RET events are enabled.
    */
-  gint depth;
+  gsize depth;
 
 #ifdef HAVE_LINUX
   GumMetalHashTable * excluded_calls;
@@ -490,7 +491,11 @@ extern _Unwind_Reason_Code __gxx_personality_v0 (int version,
     _Unwind_Exception * unwind_exception, _Unwind_Context * context)
     __attribute__ ((weak));
 extern const void * _Unwind_Find_FDE (const void * pc, struct dwarf_eh_bases *);
+#if !(defined (__LP64__) || defined (_WIN64))
+extern _Unwind_Ptr _Unwind_GetIP (struct _Unwind_Context *);
+#else
 extern unsigned long _Unwind_GetIP (struct _Unwind_Context *);
+#endif
 
 static void gum_stalker_ensure_unwind_apis_instrumented (void);
 static void gum_stalker_deinit_unwind_apis_instrumentation (void);
@@ -692,7 +697,9 @@ static void gum_exec_block_write_jmp_transfer_code (GumExecBlock * block,
     const GumBranchTarget * target, GumExecCtxReplaceCurrentBlockFunc func,
     GumGeneratorContext * gc);
 static void gum_exec_block_write_ret_transfer_code (GumExecBlock * block,
-    GumGeneratorContext * gc, aarch64_reg ret_reg);
+    GumGeneratorContext * gc, arm64_reg ret_reg);
+static void gum_exec_block_write_chaining_return_code (GumExecBlock * block,
+    GumGeneratorContext * gc, arm64_reg ret_reg);
 static void gum_exec_block_write_slab_transfer_code (GumArm64Writer * from,
     GumArm64Writer * to);
 static void gum_exec_block_backpatch_slab (GumExecBlock * block,
@@ -763,8 +770,6 @@ static gpointer gum_slab_try_reserve (GumSlab * self, gsize size);
 
 static gpointer gum_find_pthread_exit_implementation (void);
 static gpointer gum_find_thread_exit_implementation(void);
-
-static gboolean gum_is_bl_imm (guint32 insn) G_GNUC_UNUSED;
 
 G_DEFINE_TYPE (GumStalker, gum_stalker, G_TYPE_OBJECT)
 
@@ -1362,7 +1367,8 @@ _gum_stalker_do_follow_me (GumStalker * self,
 
   gum_event_sink_start (ctx->sink);
   ctx->sink_started = TRUE;
-  return code_address + GUM_RESTORATION_PROLOG_SIZE;
+
+  return (guint8 *) code_address + GUM_RESTORATION_PROLOG_SIZE;
 }
 
 void
@@ -1556,7 +1562,7 @@ _gum_stalker_do_activate (GumStalker * self,
     if (gum_exec_ctx_maybe_unfollow (ctx, ret_addr))
       return ret_addr;
 
-    return code_address + GUM_RESTORATION_PROLOG_SIZE;
+    return (guint8 *) code_address + GUM_RESTORATION_PROLOG_SIZE;
   }
 
   return ret_addr;
@@ -1995,6 +2001,74 @@ gum_call_probe_unref (GumCallProbe * probe)
   {
     gum_call_probe_finalize (probe);
   }
+}
+
+void
+_gum_stalker_modify_to_run_on_thread (GumStalker * self,
+                                      GumThreadId thread_id,
+                                      GumCpuContext * cpu_context,
+                                      GumStalkerRunOnThreadFunc func,
+                                      gpointer data)
+{
+  GumExecCtx * ctx;
+  GumAddress pc;
+  GumArm64Writer * cw;
+  GumAddress cpu_context_copy;
+
+  ctx = gum_stalker_create_exec_ctx (self, thread_id, NULL, NULL);
+
+  pc = gum_strip_code_address (cpu_context->pc);
+
+  gum_spinlock_acquire (&ctx->code_lock);
+
+  gum_stalker_thaw (self, ctx->thunks, self->thunks_size);
+  cw = &ctx->code_writer;
+  gum_arm64_writer_reset (cw, ctx->infect_thunk);
+
+  cpu_context_copy = GUM_ADDRESS (gum_arm64_writer_cur (cw));
+  gum_arm64_writer_put_bytes (cw, (guint8 *) cpu_context,
+      sizeof (GumCpuContext));
+
+  ctx->infect_body = GUM_ADDRESS (gum_arm64_writer_cur (cw));
+
+#ifdef HAVE_PTRAUTH
+  ctx->infect_body = GPOINTER_TO_SIZE (ptrauth_sign_unauthenticated (
+      GSIZE_TO_POINTER (ctx->infect_body),
+      ptrauth_key_process_independent_code,
+      ptrauth_string_discriminator ("pc")));
+#endif
+  gum_exec_ctx_write_prolog (ctx, GUM_PROLOG_MINIMAL, cw);
+
+  gum_arm64_writer_put_call_address_with_arguments (cw,
+      GUM_ADDRESS (func), 2,
+      GUM_ARG_ADDRESS, cpu_context_copy,
+      GUM_ARG_ADDRESS, GUM_ADDRESS (data));
+
+  gum_arm64_writer_put_call_address_with_arguments (cw,
+      GUM_ADDRESS (gum_exec_ctx_unfollow), 2,
+      GUM_ARG_ADDRESS, GUM_ADDRESS (ctx),
+      GUM_ARG_ADDRESS, pc);
+
+  gum_exec_ctx_write_epilog (ctx, GUM_PROLOG_MINIMAL, cw);
+
+  /*
+   * Here we spoil x17 since this is a necessity of the AARCH64 architecture
+   * when performing long branches. However, the documentation states...
+   *
+   * "Registers r16 (IP0) and r17 (IP1) may be used by a linker as a scratch
+   *  register between a routine and any subroutine it calls."
+   *
+   * This same approach is used elsewhere in Stalker for arm64.
+   */
+  gum_arm64_writer_put_ldr_reg_address (cw, ARM64_REG_X17, pc);
+  gum_arm64_writer_put_br_reg_no_auth (cw, ARM64_REG_X17);
+
+  gum_arm64_writer_flush (cw);
+  gum_stalker_freeze (self, cw->base, gum_arm64_writer_offset (cw));
+
+  gum_spinlock_release (&ctx->code_lock);
+
+  cpu_context->pc = ctx->infect_body;
 }
 
 static GumExecCtx *
@@ -2897,10 +2971,9 @@ gum_stalker_iterator_next (GumStalkerIterator * self,
       gc->continuation_real_address = instruction->end;
       return FALSE;
     }
-    else if (!skip_implicitly_requested && gum_arm64_relocator_eob (rl))
-    {
+
+    if (!skip_implicitly_requested && gum_arm64_relocator_eob (rl))
       return FALSE;
-    }
   }
 
   instruction = &self->instruction;
@@ -3157,6 +3230,18 @@ gum_stalker_invoke_callout (GumCalloutEntry * entry,
   ec->pending_calls++;
   entry->callout (cpu_context, entry->data);
   ec->pending_calls--;
+}
+
+void
+gum_stalker_iterator_put_chaining_return (GumStalkerIterator * self)
+{
+  GumExecBlock * block = self->exec_block;
+  GumGeneratorContext * gc = self->generator_context;
+
+  if ((block->ctx->sink_mask & GUM_RET) != 0)
+    gum_exec_block_write_ret_event_code (block, gc, GUM_CODE_INTERRUPTIBLE);
+
+  gum_exec_block_write_chaining_return_code (block, gc, ARM64_REG_X30);
 }
 
 csh
@@ -3785,7 +3870,8 @@ gum_exec_ctx_try_handle_exception (GumExecCtx * ctx,
 
   if (cpu_context->sp % GUM_STACK_ALIGNMENT == 0)
     return FALSE;
-  switch (*insn)
+
+  switch (GUINT32_FROM_LE (*insn))
   {
     /* STP */
     case 0xa9bf07e0: /* stp x0, x1, [sp, #-0x10]! */
@@ -3861,10 +3947,11 @@ static guint64
 gum_exec_ctx_read_register (GumCpuContext * cpu_context,
                             aarch64_reg reg)
 {
+  if (reg >= ARM64_REG_X0 && reg <= ARM64_REG_X28)
+    return cpu_context->x[reg - ARM64_REG_X0];
+
   switch (reg)
   {
-    case AArch64_REG_X0...AArch64_REG_X28:
-      return cpu_context->x[reg - AArch64_REG_X0];
     case AArch64_REG_X29:
       return cpu_context->fp;
     case AArch64_REG_X30:
@@ -3879,11 +3966,14 @@ gum_exec_ctx_write_register (GumCpuContext * cpu_context,
                              aarch64_reg reg,
                              guint64 value)
 {
+  if (reg >= ARM64_REG_X0 && reg <= ARM64_REG_X28)
+  {
+    cpu_context->x[reg - ARM64_REG_X0] = value;
+    return;
+  }
+
   switch (reg)
   {
-    case AArch64_REG_X0...AArch64_REG_X28:
-      cpu_context->x[reg - AArch64_REG_X0] = value;
-      break;
     case AArch64_REG_X29:
       cpu_context->fp = value;
       break;
@@ -4269,7 +4359,9 @@ gum_exec_block_backpatch_inline_cache (GumExecBlock * block,
       from_insn, &target);
 
   ic_entries = from->ic_entries;
-  g_assert (ic_entries != NULL);
+  if (ic_entries == NULL)
+    return;
+
   num_ic_entries = ctx->stalker->ic_entries;
 
   for (i = 0; i != num_ic_entries; i++)
@@ -4987,7 +5079,7 @@ gum_exec_block_backpatch_excluded_call (GumExecBlock * block,
       (num_ic_entries - 1) * sizeof (GumIcEntry));
 
   ic_entries[0].real_start = target;
-  ic_entries[0].code_start = target + 1;
+  ic_entries[0].code_start = (guint8 *) target + 1;
 
   gum_spinlock_release (&ctx->code_lock);
 
@@ -5113,6 +5205,14 @@ static void
 gum_exec_block_write_ret_transfer_code (GumExecBlock * block,
                                         GumGeneratorContext * gc,
                                         aarch64_reg ret_reg)
+{
+  gum_exec_block_write_chaining_return_code (block, gc, ret_reg);
+}
+
+static void
+gum_exec_block_write_chaining_return_code (GumExecBlock * block,
+                                           GumGeneratorContext  * gc,
+                                           arm64_reg ret_reg)
 {
   GumArm64Writer * cw = gc->code_writer;
   GumArm64Writer * cws = gc->slow_writer;
@@ -5943,55 +6043,28 @@ static gpointer
 gum_find_pthread_exit_implementation (void)
 {
 #if defined (HAVE_DARWIN)
-  guint32 * cursor;
-
-  cursor = GSIZE_TO_POINTER (gum_strip_code_address (
-      gum_module_find_export_by_name ("/usr/lib/system/libsystem_pthread.dylib",
-          "pthread_exit")));
-
-  do
-  {
-    guint32 insn = *cursor;
-
-    if (gum_is_bl_imm (insn))
-    {
-      union
-      {
-        gint32 i;
-        guint32 u;
-      } distance;
-
-      distance.u = insn & GUM_INT26_MASK;
-      if ((distance.u & (1 << (26 - 1))) != 0)
-        distance.u |= 0xfc000000;
-
-      return cursor + distance.i;
-    }
-
-    cursor++;
-  }
-  while (TRUE);
+  return gum_arm64_reader_find_next_bl_target (GSIZE_TO_POINTER (
+        gum_strip_code_address (gum_module_find_export_by_name (
+            gum_process_get_libc_module (), "pthread_exit"))));
 #elif defined (HAVE_GLIBC)
   return GSIZE_TO_POINTER (gum_module_find_export_by_name (
-        gum_process_query_libc_name (),
+        gum_process_get_libc_module (),
         "__call_tls_dtors"));
 #elif defined (HAVE_ANDROID)
   return GSIZE_TO_POINTER (gum_module_find_export_by_name (
-        gum_process_query_libc_name (),
+        gum_process_get_libc_module (),
         "pthread_exit"));
 #elif defined (HAVE_FREEBSD)
-  return GSIZE_TO_POINTER (gum_module_find_export_by_name (
-        "/lib/libthr.so.3",
-        "_pthread_exit"));
+  GumAddress result;
+  GumModule * libthr;
+
+  libthr = gum_process_find_module_by_name ("/lib/libthr.so.3");
+  g_assert (libthr != NULL);
+  result = gum_module_find_export_by_name (libthr, "_pthread_exit");
+  g_object_unref (libthr);
+
+  return GSIZE_TO_POINTER (result);
 #else
   return NULL;
 #endif
 }
-
-static gboolean
-gum_is_bl_imm (guint32 insn)
-{
-  return (insn & ~GUM_INT26_MASK) == 0x94000000;
-}
-
-#endif

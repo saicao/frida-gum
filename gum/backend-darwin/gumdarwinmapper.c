@@ -1,15 +1,13 @@
 /*
- * Copyright (C) 2015-2023 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2015-2025 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  * Copyright (C) 2023 Fabian Freyer <fabian.freyer@physik.tu-berlin.de>
  *
  * Licence: wxWindows Library Licence, Version 3.1
  */
 
-#ifndef GUM_DIET
+#include "gum/gumdarwinmapper.h"
 
-#include "gumdarwinmapper.h"
-
-#include "gumdarwin.h"
+#include "gum/gumdarwin.h"
 #include "gumdarwinmodule.h"
 #include "helpers/fixupchainprocessor.h"
 
@@ -57,6 +55,7 @@ struct _GumDarwinMapper
   GumDarwinModule * module;
   GumDarwinModuleImage * image;
   GumDarwinModuleResolver * resolver;
+  GumDarwinModuleResolver * local_resolver;
   GumDarwinMapper * parent;
 
   gboolean mapped;
@@ -81,6 +80,7 @@ struct _GumDarwinMapper
   gsize constructor_offset;
   gsize destructor_offset;
   guint chained_fixups_count;
+  GumMemoryRange shared_cache_range;
   GumDarwinTlvParameters tlv;
 
   GArray * chained_symbols;
@@ -148,6 +148,7 @@ struct _GumLibdyldDyld4Section64
 };
 
 static void gum_darwin_mapper_constructed (GObject * object);
+static void gum_darwin_mapper_dispose (GObject * object);
 static void gum_darwin_mapper_finalize (GObject * object);
 static void gum_darwin_mapper_get_property (GObject * object, guint property_id,
     GValue * value, GParamSpec * pspec);
@@ -303,6 +304,7 @@ gum_darwin_mapper_class_init (GumDarwinMapperClass * klass)
   GObjectClass * object_class = G_OBJECT_CLASS (klass);
 
   object_class->constructed = gum_darwin_mapper_constructed;
+  object_class->dispose = gum_darwin_mapper_dispose;
   object_class->finalize = gum_darwin_mapper_finalize;
   object_class->get_property = gum_darwin_mapper_get_property;
   object_class->set_property = gum_darwin_mapper_set_property;
@@ -327,6 +329,9 @@ gum_darwin_mapper_class_init (GumDarwinMapperClass * klass)
 static void
 gum_darwin_mapper_init (GumDarwinMapper * self)
 {
+  self->local_resolver =
+      gum_darwin_module_resolver_new (mach_task_self (), NULL);
+
   self->mapped = FALSE;
   self->apple_parameters = g_ptr_array_new_with_free_func (g_free);
 }
@@ -341,11 +346,14 @@ gum_darwin_mapper_constructed (GObject * object)
   g_assert (self->module != NULL);
   g_assert (self->resolver != NULL);
 
+  gum_darwin_query_shared_cache_range (self->resolver->task,
+      &self->shared_cache_range);
+
   gum_darwin_module_query_tlv_parameters (self->module, &self->tlv);
 
   if (self->tlv.num_descriptors != 0)
   {
-    GumDarwinModule * pthread = gum_darwin_module_resolver_find_module (
+    GumDarwinModule * pthread = gum_darwin_module_resolver_find_module_by_name (
         self->resolver, "/usr/lib/system/libsystem_pthread.dylib");
     if (pthread != NULL)
     {
@@ -355,6 +363,7 @@ gum_darwin_mapper_constructed (GObject * object)
       self->pthread_key_delete =
           gum_darwin_module_resolver_find_export_address (self->resolver,
               pthread, "pthread_key_delete");
+      g_object_unref (pthread);
     }
   }
 
@@ -364,6 +373,18 @@ gum_darwin_mapper_constructed (GObject * object)
 
     gum_darwin_mapper_add_pending_mapping (parent, self->name, self);
   }
+}
+
+static void
+gum_darwin_mapper_dispose (GObject * object)
+{
+  GumDarwinMapper * self = GUM_DARWIN_MAPPER (object);
+
+  g_clear_object (&self->local_resolver);
+  g_clear_object (&self->resolver);
+  g_clear_object (&self->module);
+
+  G_OBJECT_CLASS (gum_darwin_mapper_parent_class)->dispose (object);
 }
 
 static void
@@ -383,8 +404,6 @@ gum_darwin_mapper_finalize (GObject * object)
   g_ptr_array_unref (self->apple_parameters);
   g_ptr_array_unref (self->dependencies);
 
-  g_object_unref (self->resolver);
-  g_object_unref (self->module);
   g_free (self->name);
 
   G_OBJECT_CLASS (gum_darwin_mapper_parent_class)->finalize (object);
@@ -774,10 +793,11 @@ gum_darwin_mapper_map (GumDarwinMapper * self,
   {
     GumDarwinModule * libdyld;
 
-    libdyld = gum_darwin_module_resolver_find_module (self->resolver,
+    libdyld = gum_darwin_module_resolver_find_module_by_name (self->resolver,
         "libdyld.dylib");
     ctx.success = FALSE;
     gum_darwin_module_enumerate_sections (libdyld, gum_find_tlv_get_addr, &ctx);
+    g_object_unref (libdyld);
     if (!ctx.success)
       goto unsupported_dyld_version;
 
@@ -1167,11 +1187,12 @@ gum_emit_runtime (GumDarwinMapper * self,
       (GumFoundDarwinBindFunc) gum_emit_resolve_if_needed, &ctx);
   gum_darwin_module_enumerate_lazy_binds (module,
       (GumFoundDarwinBindFunc) gum_emit_resolve_if_needed, &ctx);
-  gum_darwin_module_enumerate_init_pointers (module,
-      (GumFoundDarwinInitPointersFunc) gum_emit_init_calls, &ctx);
 
   if (tlv->num_descriptors != 0)
     gum_emit_tlv_init_code (&ctx);
+
+  gum_darwin_module_enumerate_init_pointers (module,
+      (GumFoundDarwinInitPointersFunc) gum_emit_init_calls, &ctx);
 
   gum_x86_writer_put_add_reg_imm (&cw, GUM_X86_XSP, self->module->pointer_size);
   gum_x86_writer_put_pop_reg (&cw, GUM_X86_XBX);
@@ -1274,8 +1295,7 @@ gum_emit_resolve_if_needed (const GumDarwinBindDetails * details,
   entry = self->module->base_address + details->segment->vm_address +
       details->offset;
 
-  gum_x86_writer_put_mov_reg_address (cw, GUM_X86_XCX,
-      gum_darwin_mapper_make_code_address (self, value.resolver));
+  gum_x86_writer_put_mov_reg_address (cw, GUM_X86_XCX, value.resolver);
   gum_x86_writer_put_call_reg (cw, GUM_X86_XCX);
   gum_x86_writer_put_mov_reg_address (cw, GUM_X86_XCX, details->addend);
   gum_x86_writer_put_add_reg_reg (cw, GUM_X86_XAX, GUM_X86_XCX);
@@ -1574,8 +1594,7 @@ gum_emit_arm_resolve_if_needed (const GumDarwinBindDetails * details,
   entry = self->module->base_address + details->segment->vm_address +
       details->offset;
 
-  gum_thumb_writer_put_ldr_reg_address (tw, ARM_REG_R1,
-      gum_darwin_mapper_make_code_address (self, value.resolver));
+  gum_thumb_writer_put_ldr_reg_address (tw, ARM_REG_R1, value.resolver);
   gum_thumb_writer_put_blx_reg (tw, ARM_REG_R1);
   gum_thumb_writer_put_ldr_reg_address (tw, ARM_REG_R1, details->addend);
   gum_thumb_writer_put_add_reg_reg_reg (tw, ARM_REG_R0, ARM_REG_R0, ARM_REG_R1);
@@ -1710,13 +1729,14 @@ gum_emit_arm64_runtime (GumDarwinMapper * self,
       (GumFoundDarwinBindFunc) gum_emit_arm64_resolve_if_needed, &ctx);
   gum_darwin_module_enumerate_lazy_binds (module,
       (GumFoundDarwinBindFunc) gum_emit_arm64_resolve_if_needed, &ctx);
+
+  if (tlv->num_descriptors != 0)
+    gum_emit_arm64_tlv_init_code (&ctx);
+
   gum_darwin_module_enumerate_init_pointers (module,
       (GumFoundDarwinInitPointersFunc) gum_emit_arm64_init_pointer_calls, &ctx);
   gum_darwin_module_enumerate_init_offsets (module,
       (GumFoundDarwinInitOffsetsFunc) gum_emit_arm64_init_offset_calls, &ctx);
-
-  if (tlv->num_descriptors != 0)
-    gum_emit_arm64_tlv_init_code (&ctx);
 
   gum_arm64_writer_put_pop_reg_reg (&aw, AArch64_REG_X21, AArch64_REG_X22);
   gum_arm64_writer_put_pop_reg_reg (&aw, AArch64_REG_X19, AArch64_REG_X20);
@@ -1823,9 +1843,8 @@ gum_emit_arm64_resolve_if_needed (const GumDarwinBindDetails * details,
   entry = self->module->base_address + details->segment->vm_address +
       details->offset;
 
-  gum_arm64_writer_put_ldr_reg_address (aw, AArch64_REG_X1,
-      gum_darwin_mapper_make_code_address (self, value.resolver));
-  gum_arm64_writer_put_blr_reg (aw, AArch64_REG_X1);
+  gum_arm64_writer_put_ldr_reg_address (aw, AArch64_REG_X1, value.resolver);
+  gum_arm64_writer_put_blr_reg_no_auth (aw, AArch64_REG_X1);
   gum_arm64_writer_put_ldr_reg_address (aw, AArch64_REG_X1, details->addend);
   gum_arm64_writer_put_add_reg_reg_reg (aw, AArch64_REG_X0, AArch64_REG_X0,
       AArch64_REG_X1);
@@ -1949,10 +1968,10 @@ gum_emit_arm64_tlv_init_code (GumEmitArm64Context * ctx)
   gum_arm64_writer_put_mrs (aw, AArch64_REG_X20, GUM_ARM64_SYSREG_TPIDRRO_EL0);
   gum_arm64_writer_put_and_reg_reg_imm (aw, AArch64_REG_X20, AArch64_REG_X20,
       (guint64) -8);
-  gum_arm64_writer_put_add_reg_reg_reg (aw, AArch64_REG_X19, AArch64_REG_X19,
-      AArch64_REG_X20);
+  gum_arm64_writer_put_add_reg_reg_reg (aw,AArch64_REG_X19, AArch64_REG_X19,
+      ARM64_REG_X20);
   gum_arm64_writer_put_ldr_reg_address (aw, AArch64_REG_X20, self->tlv_area);
-  gum_arm64_writer_put_str_reg_reg (aw, AArch64_REG_X19, AArch64_REG_X20);
+  gum_arm64_writer_put_str_reg_reg (aw, AArch64_REG_X20, AArch64_REG_X19);
 
   gum_arm64_writer_put_ldr_reg_u64 (aw, AArch64_REG_X20, tlv_section);
   gum_arm64_writer_put_ldr_reg_address (aw, AArch64_REG_X21,
@@ -1960,14 +1979,14 @@ gum_emit_arm64_tlv_init_code (GumEmitArm64Context * ctx)
 
   gum_arm64_writer_put_label (aw, next_label);
 
-  gum_arm64_writer_put_ldr_reg_u64 (aw, AArch64_REG_X19, self->tlv_get_addr_addr);
+  gum_arm64_writer_put_ldr_reg_u64 (aw, AArch64_REG_X19,
+      gum_strip_code_address (self->tlv_get_addr_addr));
   gum_arm64_writer_put_str_reg_reg (aw, AArch64_REG_X19, AArch64_REG_X20);
   gum_arm64_writer_put_add_reg_reg_imm (aw, AArch64_REG_X20, AArch64_REG_X20,
       pointer_size);
 
   gum_arm64_writer_put_ldr_reg_reg (aw, AArch64_REG_X19, AArch64_REG_X20);
-  gum_arm64_writer_put_cmp_reg_reg (aw, AArch64_REG_X19, AArch64_REG_X19);
-  gum_arm64_writer_put_cbnz_reg_label (aw, AArch64_REG_X21, has_key_label);
+  gum_arm64_writer_put_cbnz_reg_label (aw, AArch64_REG_X19, has_key_label);
 
   gum_arm64_writer_put_ldr_reg_address (aw, AArch64_REG_X19, self->pthread_key);
   gum_arm64_writer_put_ldr_reg_reg (aw, AArch64_REG_X19, AArch64_REG_X19);
@@ -2190,9 +2209,12 @@ gum_darwin_mapper_get_dependency_by_name (GumDarwinMapper * self,
   if (mapping == NULL)
   {
     GumDarwinModule * module =
-        gum_darwin_module_resolver_find_module (resolver, name);
+        gum_darwin_module_resolver_find_module_by_name (resolver, name);
     if (module != NULL)
+    {
       mapping = gum_darwin_mapper_add_existing_mapping (self, module);
+      g_object_unref (module);
+    }
   }
 
   if (mapping == NULL)
@@ -2332,6 +2354,46 @@ gum_darwin_mapper_resolve_symbol (GumDarwinMapper * self,
     }
     value->resolver = 0;
     return TRUE;
+  }
+
+  if (GUM_MEMORY_RANGE_INCLUDES (&self->shared_cache_range,
+        module->base_address))
+  {
+    GumDarwinModule * local_module;
+    GumExportDetails d;
+
+    local_module = gum_darwin_module_resolver_find_module_by_name (
+        self->local_resolver, module->name);
+    if (local_module != NULL &&
+        gum_darwin_module_resolver_find_export_by_mangled_name (
+          self->local_resolver, local_module, name, &d))
+    {
+      value->address = d.address;
+    }
+    else
+    {
+      value->address = 0;
+    }
+    g_clear_object (&local_module);
+
+#ifdef HAVE_ARM64
+    if (value->address != 0)
+    {
+      /*
+       * XXX: Symbols with a resolver, such as strcmp() on macOS Sequoia, have
+       *      an invalid signature. Asking the CPU to strip the ptrauth bits
+       *      in such a case thus results in more junk being added.
+       */
+      if (value->address >> 47 == 0x100)
+        value->address &= 0x7fffffffffffff;
+      else
+        value->address = gum_strip_code_address (value->address);
+    }
+#endif
+    value->resolver = 0;
+
+    if (value->address != 0)
+      return TRUE;
   }
 
   if (!gum_darwin_module_resolve_export (module, name, &details))
@@ -2774,5 +2836,3 @@ gum_find_tlv_get_addr (const GumDarwinSectionDetails * details,
 
   return FALSE;
 }
-
-#endif

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020-2024 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2020-2025 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  * Copyright (C) 2020-2021 Francesco Tamagni <mrmacete@protonmail.ch>
  * Copyright (C) 2021 Abdelrahman Eid <hot3eed@gmail.com>
  *
@@ -58,7 +58,6 @@ struct _GumQuickCore
   GumQuickScript * script;
   GumQuickScriptBackend * backend;
   GumESProgram * program;
-  const gchar * runtime_source_map;
   GumQuickInterceptor * interceptor;
   GumQuickStalker * stalker;
   GumQuickMessageEmitter message_emitter;
@@ -135,6 +134,7 @@ struct _GumQuickCore
   GUM_DECLARE_ATOM (cachedInput);
   GUM_DECLARE_ATOM (cachedOutput);
   GUM_DECLARE_ATOM (context);
+  GUM_DECLARE_ATOM (entrypoint);
   GUM_DECLARE_ATOM (exceptions);
   GUM_DECLARE_ATOM (file);
   GUM_DECLARE_ATOM (handle);
@@ -149,6 +149,7 @@ struct _GumQuickCore
   GUM_DECLARE_ATOM (nativeContext);
   GUM_DECLARE_ATOM (offset);
   GUM_DECLARE_ATOM (operation);
+  GUM_DECLARE_ATOM (parameter);
   GUM_DECLARE_ATOM (path);
   GUM_DECLARE_ATOM (pc);
   GUM_DECLARE_ATOM (port);
@@ -156,6 +157,7 @@ struct _GumQuickCore
   GUM_DECLARE_ATOM (prototype);
   GUM_DECLARE_ATOM (read);
   GUM_DECLARE_ATOM (resource);
+  GUM_DECLARE_ATOM (routine);
   GUM_DECLARE_ATOM (scheduling);
   GUM_DECLARE_ATOM (section);
   GUM_DECLARE_ATOM (size);
@@ -266,17 +268,14 @@ struct _GumQuickNativeCallback
   ffi_type ** atypes;
   GSList * data;
 
-  gint interceptor_replacement_count;
-
   GumQuickCore * core;
 };
 
 G_GNUC_INTERNAL void _gum_quick_core_init (GumQuickCore * self,
     GumQuickScript * script, JSContext * ctx, JSValue ns, GRecMutex * mutex,
-    GumESProgram * program, const gchar * runtime_source_map,
-    GumQuickInterceptor * interceptor, GumQuickStalker * stalker,
-    GumQuickMessageEmitter message_emitter, gpointer message_emitter_data,
-    GumScriptScheduler * scheduler);
+    GumESProgram * program, GumQuickInterceptor * interceptor,
+    GumQuickStalker * stalker, GumQuickMessageEmitter message_emitter,
+    gpointer message_emitter_data, GumScriptScheduler * scheduler);
 G_GNUC_INTERNAL gboolean _gum_quick_core_flush (GumQuickCore * self,
     GumQuickFlushNotify flush_notify, gpointer flush_data,
     GDestroyNotify flush_data_destroy);

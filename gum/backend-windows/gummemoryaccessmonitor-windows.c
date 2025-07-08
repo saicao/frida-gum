@@ -1,16 +1,14 @@
 /*
- * Copyright (C) 2010-2023 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2010-2024 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  * Copyright (C) 2015 Eloi Vanderbeken <eloi.vanderbeken@synacktiv.com>
  *
  * Licence: wxWindows Library Licence, Version 3.1
  */
 
-#ifndef GUM_DIET
-
 #include "gummemoryaccessmonitor.h"
 
 #include "gumexceptor.h"
-#include "gumwindows.h"
+#include "gum/gumwindows.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 # define WIN32_LEAN_AND_MEAN
@@ -146,7 +144,7 @@ gum_memory_access_monitor_new (const GumMemoryRange * ranges,
 
   monitor = g_object_new (GUM_TYPE_MEMORY_ACCESS_MONITOR, NULL);
 
-  monitor->ranges = g_memdup (ranges, num_ranges * sizeof (GumMemoryRange));
+  monitor->ranges = g_memdup2 (ranges, num_ranges * sizeof (GumMemoryRange));
   monitor->num_ranges = num_ranges;
   monitor->access_mask = access_mask;
   monitor->auto_reset = auto_reset;
@@ -433,9 +431,11 @@ gum_memory_access_monitor_on_exception (GumExceptionDetails * details,
 
   self = GUM_MEMORY_ACCESS_MONITOR (user_data);
 
+  d.thread_id = details->thread_id;
   d.operation = details->memory.operation;
   d.from = details->address;
   d.address = details->memory.address;
+  d.context = &details->context;
 
   for (i = 0; i != self->num_pages; i++)
   {
@@ -516,5 +516,3 @@ gum_memory_access_monitor_on_exception (GumExceptionDetails * details,
 
   return FALSE;
 }
-
-#endif

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2008-2023 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2008-2025 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  * Copyright (C) 2008 Christian Berentsen <jc.berentsen@gmail.com>
  *
  * Licence: wxWindows Library Licence, Version 3.1
@@ -9,13 +9,13 @@
 
 #include "valgrind.h"
 #ifdef HAVE_ANDROID
-# include "backend-linux/gumandroid.h"
+# include "gum/gumandroid.h"
 #endif
 #ifdef HAVE_FREEBSD
-# include "backend-freebsd/gumfreebsd.h"
+# include "gum/gumfreebsd.h"
 #endif
 #ifdef HAVE_QNX
-# include "backend-qnx/gumqnx.h"
+# include "gum/gumqnx.h"
 #endif
 
 #if defined (HAVE_WINDOWS) && defined (_DEBUG)
@@ -171,33 +171,14 @@ TESTCASE (line_diff)
 
 /* Implementation */
 
-static gboolean gum_test_assign_own_range_if_matching (
-    const GumModuleDetails * details, gpointer user_data);
-
-static GumMemoryRange _test_util_own_range = { 0, 0 };
+static const GumMemoryRange * _test_util_own_range;
 static gchar * _test_util_system_module_name = NULL;
 static GumHeapApiList * _test_util_heap_apis = NULL;
 
 void
 _test_util_init (void)
 {
-  gum_process_enumerate_modules (gum_test_assign_own_range_if_matching,
-      &_test_util_own_range);
-}
-
-static gboolean
-gum_test_assign_own_range_if_matching (const GumModuleDetails * details,
-                                       gpointer user_data)
-{
-  if (GUM_MEMORY_RANGE_INCLUDES (details->range,
-      GUM_ADDRESS (gum_test_assign_own_range_if_matching)))
-  {
-    GumMemoryRange * own_range = user_data;
-    memcpy (own_range, details->range, sizeof (GumMemoryRange));
-    return FALSE;
-  }
-
-  return TRUE;
+  _test_util_own_range = gum_module_get_range (gum_process_get_main_module ());
 }
 
 void
@@ -601,42 +582,9 @@ recover_from_exception (void)
 # endif
 
 static gum_jmp_buf gum_try_read_and_write_context;
-static struct sigaction gum_test_old_sigsegv;
-static struct sigaction gum_test_old_sigbus;
 
-static gboolean gum_test_should_forward_signal_to (gpointer handler);
-
-static void
-gum_test_on_signal (int sig,
-                    siginfo_t * siginfo,
-                    void * context)
-{
-  struct sigaction * action;
-
-  action = (sig == SIGSEGV) ? &gum_test_old_sigsegv : &gum_test_old_sigbus;
-  if ((action->sa_flags & SA_SIGINFO) != 0)
-  {
-    if (gum_test_should_forward_signal_to (action->sa_sigaction))
-      action->sa_sigaction (sig, siginfo, context);
-  }
-  else
-  {
-    if (gum_test_should_forward_signal_to (action->sa_handler))
-      action->sa_handler (sig);
-  }
-
-  GUM_LONGJMP (gum_try_read_and_write_context, 1337);
-}
-
-static gboolean
-gum_test_should_forward_signal_to (gpointer handler)
-{
-  if (handler == NULL)
-    return FALSE;
-
-  return GUM_MEMORY_RANGE_INCLUDES (&_test_util_own_range,
-      GUM_ADDRESS (handler));
-}
+static gboolean gum_test_on_signal (GumExceptionDetails * details,
+    gpointer user_data);
 
 guint8
 gum_try_read_and_write_at (guint8 * a,
@@ -644,7 +592,6 @@ gum_try_read_and_write_at (guint8 * a,
                            gboolean * exception_raised_on_read,
                            gboolean * exception_raised_on_write)
 {
-  struct sigaction action;
   guint8 dummy_value_to_trick_optimizer = 0;
   GumExceptor * exceptor;
 
@@ -654,12 +601,7 @@ gum_try_read_and_write_at (guint8 * a,
     *exception_raised_on_write = FALSE;
 
   exceptor = gum_exceptor_obtain ();
-
-  action.sa_sigaction = gum_test_on_signal;
-  sigemptyset (&action.sa_mask);
-  action.sa_flags = SA_SIGINFO;
-  sigaction (SIGSEGV, &action, &gum_test_old_sigsegv);
-  sigaction (SIGBUS, &action, &gum_test_old_sigbus);
+  gum_exceptor_add (exceptor, gum_test_on_signal, NULL);
 
 # ifdef HAVE_ANDROID
   /* Work-around for Bionic bug up to and including Android L */
@@ -696,14 +638,18 @@ gum_try_read_and_write_at (guint8 * a,
   sigprocmask (SIG_SETMASK, &mask, NULL);
 # endif
 
-  sigaction (SIGSEGV, &gum_test_old_sigsegv, NULL);
-  memset (&gum_test_old_sigsegv, 0, sizeof (gum_test_old_sigsegv));
-  sigaction (SIGBUS, &gum_test_old_sigbus, NULL);
-  memset (&gum_test_old_sigbus, 0, sizeof (gum_test_old_sigbus));
+  gum_exceptor_remove (exceptor, gum_test_on_signal, NULL);
 
   g_object_unref (exceptor);
 
   return dummy_value_to_trick_optimizer;
+}
+
+static gboolean
+gum_test_on_signal (GumExceptionDetails * details,
+                    gpointer user_data)
+{
+  GUM_LONGJMP (gum_try_read_and_write_context, 1337);
 }
 
 #endif
@@ -884,4 +830,17 @@ append_indent (GString * str,
 
   for (i = 0; i < indent_level; i++)
     g_string_append (str, "  ");
+}
+
+void
+gum_ensure_current_thread_is_named (const gchar * name)
+{
+  /*
+   * On Linux g_thread_new() may not actually set the thread name, which is due
+   * to GLib potentially having been prebuilt against an old libc. Therefore we
+   * set the name manually using pthreads.
+   */
+#if defined (HAVE_LINUX) && defined (HAVE_PTHREAD_SETNAME_NP)
+  pthread_setname_np (pthread_self (), name);
+#endif
 }

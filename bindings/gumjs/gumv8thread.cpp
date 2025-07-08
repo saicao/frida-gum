@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2010-2022 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2010-2025 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2024 DaVinci <nstefanclaudel13@gmail.com>
+ * Copyright (C) 2024 Håvard Sørbø <havard@hsorbo.no>
  *
  * Licence: wxWindows Library Licence, Version 3.1
  */
@@ -10,15 +12,33 @@
 
 #define GUMJS_MODULE_NAME Thread
 
+#define GUMJS_THREAD_ID(o) \
+    (o)->GetInternalField (0).As<BigInt> ()->Uint64Value ()
+
 using namespace v8;
 
 GUMJS_DECLARE_FUNCTION (gumjs_thread_backtrace)
 GUMJS_DECLARE_FUNCTION (gumjs_thread_sleep)
 
+GUMJS_DECLARE_FUNCTION (gumjs_thread_set_hardware_breakpoint)
+GUMJS_DECLARE_FUNCTION (gumjs_thread_unset_hardware_breakpoint)
+GUMJS_DECLARE_FUNCTION (gumjs_thread_set_hardware_watchpoint)
+GUMJS_DECLARE_FUNCTION (gumjs_thread_unset_hardware_watchpoint)
+
+static const GumV8Function gumjs_thread_module_functions[] =
+{
+  { "_backtrace", gumjs_thread_backtrace },
+  { "sleep", gumjs_thread_sleep },
+
+  { NULL, NULL }
+};
+
 static const GumV8Function gumjs_thread_functions[] =
 {
-  { "backtrace", gumjs_thread_backtrace },
-  { "sleep", gumjs_thread_sleep },
+  { "setHardwareBreakpoint", gumjs_thread_set_hardware_breakpoint },
+  { "unsetHardwareBreakpoint", gumjs_thread_unset_hardware_breakpoint },
+  { "setHardwareWatchpoint", gumjs_thread_set_hardware_watchpoint },
+  { "unsetHardwareWatchpoint", gumjs_thread_unset_hardware_watchpoint },
 
   { NULL, NULL }
 };
@@ -34,8 +54,11 @@ _gum_v8_thread_init (GumV8Thread * self,
 
   auto module = External::New (isolate, self);
 
-  auto thread = _gum_v8_create_module ("Thread", scope, isolate);
-  _gum_v8_module_add (module, thread, gumjs_thread_functions, isolate);
+  auto klass = _gum_v8_create_class ("Thread", nullptr, scope, module, isolate);
+  _gum_v8_class_add_static (klass, gumjs_thread_module_functions, module,
+      isolate);
+  _gum_v8_class_add (klass, gumjs_thread_functions, module, isolate);
+  self->klass = new Global<FunctionTemplate> (isolate, klass);
 
   _gum_v8_create_module ("Backtracer", scope, isolate);
 }
@@ -73,6 +96,9 @@ _gum_v8_thread_dispose (GumV8Thread * self)
 
   delete self->accurate_enum_value;
   self->accurate_enum_value = nullptr;
+
+  delete self->klass;
+  self->klass = nullptr;
 }
 
 void
@@ -87,22 +113,28 @@ GUMJS_DEFINE_FUNCTION (gumjs_thread_backtrace)
   auto context = isolate->GetCurrentContext ();
 
   GumCpuContext * cpu_context = NULL;
-  Local<Value> selector;
-  if (!_gum_v8_args_parse (args, "|C?V", &cpu_context, &selector))
+  Local<Value> raw_type;
+  guint limit;
+  if (!_gum_v8_args_parse (args, "C?Vu", &cpu_context, &raw_type, &limit))
     return;
 
-  gboolean accurate = TRUE;
-  if (!selector.IsEmpty ())
+  if (!raw_type->IsSymbol ())
   {
-    if ((*module->fuzzy_enum_value) == selector)
-    {
-      accurate = FALSE;
-    }
-    else if ((*module->accurate_enum_value) != selector)
-    {
-      _gum_v8_throw_ascii_literal (isolate, "invalid backtracer enum value");
-      return;
-    }
+    _gum_v8_throw_ascii_literal (isolate, "invalid backtracer value");
+    return;
+  }
+  Local<Symbol> type = raw_type.As<Symbol> ();
+  gboolean accurate = TRUE;
+  if (type->StrictEquals (
+        Local<Symbol>::New (isolate, *module->fuzzy_enum_value)))
+  {
+    accurate = FALSE;
+  }
+  else if (!type->StrictEquals (
+        Local<Symbol>::New (isolate, *module->accurate_enum_value)))
+  {
+    _gum_v8_throw_ascii_literal (isolate, "invalid backtracer enum value");
+    return;
   }
 
   GumBacktracer * backtracer;
@@ -129,7 +161,15 @@ GUMJS_DEFINE_FUNCTION (gumjs_thread_backtrace)
   }
 
   GumReturnAddressArray ret_addrs;
-  gum_backtracer_generate (backtracer, cpu_context, &ret_addrs);
+  if (limit != 0)
+  {
+    gum_backtracer_generate_with_limit (backtracer, cpu_context, &ret_addrs,
+        limit);
+  }
+  else
+  {
+    gum_backtracer_generate (backtracer, cpu_context, &ret_addrs);
+  }
 
   auto result = Array::New (isolate, ret_addrs.len);
   for (guint i = 0; i != ret_addrs.len; i++)
@@ -155,4 +195,144 @@ GUMJS_DEFINE_FUNCTION (gumjs_thread_sleep)
 
     g_usleep (delay * G_USEC_PER_SEC);
   }
+}
+
+Local<Object>
+_gum_v8_thread_new (const GumThreadDetails * details,
+                    GumV8Thread * module)
+{
+  auto core = module->core;
+  auto isolate = core->isolate;
+  auto context = isolate->GetCurrentContext ();
+
+  auto klass = Local<FunctionTemplate>::New (isolate, *module->klass);
+  auto thread = klass->GetFunction (context).ToLocalChecked ()
+      ->NewInstance (context, 0, nullptr).ToLocalChecked ();
+  thread->SetInternalField (0, BigInt::NewFromUnsigned (isolate, details->id));
+
+  _gum_v8_object_set (thread, "id", Number::New (isolate, details->id), core);
+
+  if ((details->flags & GUM_THREAD_FLAGS_NAME) != 0)
+  {
+    _gum_v8_object_set_utf8 (thread, "name", details->name, core);
+  }
+
+  if ((details->flags & GUM_THREAD_FLAGS_STATE) != 0)
+  {
+    _gum_v8_object_set (thread, "state", _gum_v8_string_new_ascii (isolate,
+        _gum_v8_thread_state_to_string (details->state)), core);
+  }
+
+  if ((details->flags & GUM_THREAD_FLAGS_CPU_CONTEXT) != 0)
+  {
+    auto cpu_context =
+        _gum_v8_cpu_context_new_immutable (&details->cpu_context, core);
+    _gum_v8_object_set (thread, "context", cpu_context, core);
+    _gum_v8_cpu_context_free_later (new Global<Object> (isolate, cpu_context),
+        core);
+  }
+
+  if ((details->flags & (GUM_THREAD_FLAGS_ENTRYPOINT_ROUTINE |
+          GUM_THREAD_FLAGS_ENTRYPOINT_PARAMETER)) != 0)
+  {
+    const GumThreadEntrypoint * ep = &details->entrypoint;
+
+    auto obj = Object::New (isolate);
+    if ((details->flags & GUM_THREAD_FLAGS_ENTRYPOINT_ROUTINE) != 0)
+      _gum_v8_object_set_pointer (obj, "routine", ep->routine, core);
+    if ((details->flags & GUM_THREAD_FLAGS_ENTRYPOINT_PARAMETER) != 0)
+      _gum_v8_object_set_pointer (obj, "parameter", ep->parameter, core);
+
+    _gum_v8_object_set (thread, "entrypoint", obj, core);
+  }
+
+  return thread;
+}
+
+GUMJS_DEFINE_FUNCTION (gumjs_thread_set_hardware_breakpoint)
+{
+  GumThreadId thread_id = GUMJS_THREAD_ID (info.Holder ());
+
+  guint breakpoint_id;
+  gpointer address;
+  if (!_gum_v8_args_parse (args, "up", &breakpoint_id, &address))
+    return;
+
+  GError * error = NULL;
+  gum_thread_set_hardware_breakpoint (thread_id, breakpoint_id,
+      GUM_ADDRESS (address), &error);
+  _gum_v8_maybe_throw (isolate, &error);
+}
+
+GUMJS_DEFINE_FUNCTION (gumjs_thread_unset_hardware_breakpoint)
+{
+  GumThreadId thread_id = GUMJS_THREAD_ID (info.Holder ());
+
+  guint breakpoint_id;
+  if (!_gum_v8_args_parse (args, "u", &breakpoint_id))
+    return;
+
+  GError * error = NULL;
+  gum_thread_unset_hardware_breakpoint (thread_id, breakpoint_id, &error);
+  _gum_v8_maybe_throw (isolate, &error);
+}
+
+GUMJS_DEFINE_FUNCTION (gumjs_thread_set_hardware_watchpoint)
+{
+  GumThreadId thread_id = GUMJS_THREAD_ID (info.Holder ());
+
+  guint watchpoint_id;
+  gpointer address;
+  gsize size;
+  gchar * conditions_str;
+  if (!_gum_v8_args_parse (args, "upZs", &watchpoint_id, &address, &size,
+        &conditions_str))
+  {
+    return;
+  }
+
+  auto conditions = (GumWatchConditions) 0;
+  bool conditions_valid = true;
+  for (const gchar * ch = conditions_str; *ch != '\0'; ch++)
+  {
+    switch (*ch)
+    {
+      case 'r':
+        conditions = (GumWatchConditions) (conditions | GUM_WATCH_READ);
+        break;
+      case 'w':
+        conditions = (GumWatchConditions) (conditions | GUM_WATCH_WRITE);
+        break;
+      default:
+        conditions_valid = false;
+        break;
+    }
+  }
+
+  g_free (conditions_str);
+
+  if (conditions == 0 || !conditions_valid)
+  {
+    _gum_v8_throw_ascii_literal (isolate,
+        "expected a string specifying watch conditions, e.g. 'rw'");
+    return;
+  }
+
+  GError * error = NULL;
+  gum_thread_set_hardware_watchpoint (thread_id, watchpoint_id,
+      GUM_ADDRESS (address), size, conditions, &error);
+  _gum_v8_maybe_throw (isolate, &error);
+}
+
+GUMJS_DEFINE_FUNCTION (gumjs_thread_unset_hardware_watchpoint)
+{
+  GumThreadId thread_id = GUMJS_THREAD_ID (info.Holder ());
+
+  guint watchpoint_id;
+  if (!_gum_v8_args_parse (args, "u", &watchpoint_id))
+    return;
+
+  GError * error = NULL;
+  gum_thread_unset_hardware_watchpoint (thread_id, watchpoint_id, &error);
+  _gum_v8_maybe_throw (isolate, &error);
 }

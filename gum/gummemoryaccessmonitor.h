@@ -7,13 +7,13 @@
 #ifndef __GUM_MEMORY_ACCESS_MONITOR_H__
 #define __GUM_MEMORY_ACCESS_MONITOR_H__
 
-#include <gum/gummemory.h>
+#include <gum/gumprocess.h>
 
 G_BEGIN_DECLS
 
 #define GUM_TYPE_MEMORY_ACCESS_MONITOR (gum_memory_access_monitor_get_type ())
-GUM_DECLARE_FINAL_TYPE (GumMemoryAccessMonitor, gum_memory_access_monitor, GUM,
-                        MEMORY_ACCESS_MONITOR, GObject)
+G_DECLARE_FINAL_TYPE (GumMemoryAccessMonitor, gum_memory_access_monitor, GUM,
+                      MEMORY_ACCESS_MONITOR, GObject)
 
 typedef struct _GumMemoryAccessDetails GumMemoryAccessDetails;
 
@@ -22,6 +22,7 @@ typedef void (* GumMemoryAccessNotify) (GumMemoryAccessMonitor * monitor,
 
 struct _GumMemoryAccessDetails
 {
+  GumThreadId thread_id;
   GumMemoryOperation operation;
   gpointer from;
   gpointer address;
@@ -30,6 +31,8 @@ struct _GumMemoryAccessDetails
   guint page_index;
   guint pages_completed;
   guint pages_total;
+
+  GumCpuContext * context;
 };
 
 GUM_API GumMemoryAccessMonitor * gum_memory_access_monitor_new (

@@ -10,6 +10,7 @@
 
 #include "gumquickvalue.h"
 
+#include <glib/gprintf.h>
 #include <gum/gumspinlock.h>
 #include <string.h>
 
@@ -293,7 +294,7 @@ gum_quick_js_event_sink_drain (GumQuickJSEventSink * self)
     return TRUE;
   size = len * sizeof (GumEvent);
 
-  buffer_data = g_memdup (self->queue->data, size);
+  buffer_data = g_memdup2 (self->queue->data, size);
 
   gum_spinlock_acquire (&self->lock);
   g_array_remove_range (self->queue, 0, len);
@@ -339,7 +340,7 @@ gum_quick_js_event_sink_drain (GumQuickJSEventSink * self)
     g_hash_table_iter_init (&iter, frequencies);
     while (g_hash_table_iter_next (&iter, &target, &count))
     {
-      sprintf (target_str, "0x%" G_GSIZE_MODIFIER "x",
+      g_sprintf (target_str, "0x%" G_GSIZE_MODIFIER "x",
           GPOINTER_TO_SIZE (target));
       JS_DefinePropertyValueStr (ctx, summary,
           target_str,

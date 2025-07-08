@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2008-2023 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2008-2025 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  *
  * Licence: wxWindows Library Licence, Version 3.1
  */
@@ -31,8 +31,10 @@
 #include <gum/gummemorymap.h>
 #include <gum/gummetalarray.h>
 #include <gum/gummetalhash.h>
+#include <gum/gummodule.h>
 #include <gum/gummoduleapiresolver.h>
 #include <gum/gummodulemap.h>
+#include <gum/gummoduleregistry.h>
 #include <gum/gumprintf.h>
 #include <gum/gumprocess.h>
 #include <gum/gumreturnaddress.h>
@@ -40,6 +42,7 @@
 #include <gum/gumstalker.h>
 #include <gum/gumsymbolutil.h>
 #include <gum/gumsysinternals.h>
+#include <gum/gumthreadregistry.h>
 #include <gum/gumtls.h>
 
 G_BEGIN_DECLS

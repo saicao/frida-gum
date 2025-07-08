@@ -1,6 +1,7 @@
 /*
  * Copyright (C) 2008-2023 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  * Copyright (C) 2023 Håvard Sørbø <havard@hsorbo.no>
+ * Copyright (C) 2024 Yannis Juglaret <yjuglaret@mozilla.com>
  *
  * Licence: wxWindows Library Licence, Version 3.1
  */
@@ -118,9 +119,13 @@ typedef GumMipsCpuContext GumCpuContext;
  * The only non-legacy big-endian configuration on 32-bit ARM systems is BE8.
  * In this configuration, whilst the data is in big-endian, the code stream is
  * still in little-endian. Since Capstone is disassembling the code stream, it
- * should work in little-endian even on BE8 systems.
+ * should work in little-endian even on BE8 systems. On big-endian 64-bit ARM
+ * systems, the code stream is likewise in little-endian.
  */
-#if G_BYTE_ORDER == G_LITTLE_ENDIAN || defined (__arm__)
+#if G_BYTE_ORDER == G_LITTLE_ENDIAN || \
+    defined (__arm__) || \
+    defined (_M_ARM64) || \
+    defined (__aarch64__)
 # define GUM_DEFAULT_CS_ENDIAN CS_MODE_LITTLE_ENDIAN
 #else
 # define GUM_DEFAULT_CS_ENDIAN CS_MODE_BIG_ENDIAN
@@ -137,6 +142,7 @@ typedef GumMipsCpuContext GumCpuContext;
 
 enum _GumOS
 {
+  GUM_OS_NONE,
   GUM_OS_WINDOWS,
   GUM_OS_MACOS,
   GUM_OS_LINUX,
@@ -172,11 +178,12 @@ typedef enum {
 enum _GumCpuFeatures
 {
   GUM_CPU_AVX2            = 1 << 0,
-  GUM_CPU_THUMB_INTERWORK = 1 << 1,
-  GUM_CPU_VFP2            = 1 << 2,
-  GUM_CPU_VFP3            = 1 << 3,
-  GUM_CPU_VFPD32          = 1 << 4,
-  GUM_CPU_PTRAUTH         = 1 << 5,
+  GUM_CPU_CET_SS          = 1 << 1,
+  GUM_CPU_THUMB_INTERWORK = 1 << 2,
+  GUM_CPU_VFP2            = 1 << 3,
+  GUM_CPU_VFP3            = 1 << 4,
+  GUM_CPU_VFPD32          = 1 << 5,
+  GUM_CPU_PTRAUTH         = 1 << 6,
 };
 
 typedef enum {
@@ -417,12 +424,20 @@ enum _GumRelocationScenario
 
 #define GUM_MAX_THREAD_RANGES 2
 
-#if GLIB_SIZEOF_VOID_P == 8
-#define GUM_CPU_MODE CS_MODE_64
-#define GUM_X86_THUNK
+#if defined (HAVE_I386)
+# if GLIB_SIZEOF_VOID_P == 8
+#  define GUM_CPU_MODE CS_MODE_64
+#  define GUM_X86_THUNK
+# else
+#  define GUM_CPU_MODE CS_MODE_32
+#  define GUM_X86_THUNK GUM_FASTCALL
+# endif
 #else
-#define GUM_CPU_MODE CS_MODE_32
-#define GUM_X86_THUNK GUM_FASTCALL
+# if G_BYTE_ORDER == G_LITTLE_ENDIAN
+#  define GUM_CPU_MODE CS_MODE_LITTLE_ENDIAN
+# else
+#  define GUM_CPU_MODE CS_MODE_BIG_ENDIAN
+# endif
 #endif
 #if !defined (G_OS_WIN32) && GLIB_SIZEOF_VOID_P == 8
 # define GUM_X86_THUNK_REG_ARG0 GUM_X86_XDI
@@ -525,60 +540,6 @@ enum _GumRelocationScenario
     (((gint64) (i)) >= (gint64) G_MININT32 && \
      ((gint64) (i)) <= (gint64) G_MAXINT32)
 
-#ifndef GUM_DIET
-
-# define GUM_DECLARE_FINAL_TYPE(ModuleObjName, module_obj_name, MODULE, \
-      OBJ_NAME, ParentName) \
-    G_DECLARE_FINAL_TYPE (ModuleObjName, module_obj_name, MODULE, OBJ_NAME, \
-      ParentName)
-# define GUM_DECLARE_INTERFACE(ModuleObjName, module_obj_name, MODULE, \
-      OBJ_NAME, PrerequisiteName) \
-    G_DECLARE_INTERFACE (ModuleObjName, module_obj_name, MODULE, OBJ_NAME, \
-      PrerequisiteName)
-# define GUM_DEFINE_BOXED_TYPE(TypeName, type_name, copy_func, free_func) \
-    G_DEFINE_BOXED_TYPE (TypeName, type_name, copy_func, free_func)
-# define gum_object_ref(object) g_object_ref (object)
-# define gum_object_unref(object) g_object_unref (object)
-# define gum_clear_object(object_ptr) \
-    g_clear_pointer ((object_ptr), g_object_unref)
-
-#else
-
-# define GUM_DECLARE_FINAL_TYPE(ModuleObjName, module_obj_name, MODULE, \
-      OBJ_NAME, ParentName) \
-    typedef struct _##ModuleObjName ModuleObjName; \
-    \
-    G_GNUC_UNUSED static inline ModuleObjName * MODULE##_##OBJ_NAME ( \
-      gpointer obj) \
-    { \
-      return obj; \
-    }
-# define GUM_DECLARE_INTERFACE(ModuleObjName, module_obj_name, MODULE, \
-      OBJ_NAME, PrerequisiteName) \
-    typedef struct _##ModuleObjName ModuleObjName; \
-    \
-    G_GNUC_UNUSED static inline ModuleObjName * MODULE##_##OBJ_NAME ( \
-      gpointer obj) \
-    { \
-      return obj; \
-    }
-# define GUM_DEFINE_BOXED_TYPE(TypeName, type_name, copy_func, free_func)
-# define gum_clear_object(object_ptr) \
-    g_clear_pointer ((object_ptr), gum_object_unref)
-
-typedef struct _GumObject GumObject;
-
-struct _GumObject
-{
-  gint ref_count;
-  void (* finalize) (GumObject * object);
-};
-
-GUM_API gpointer gum_object_ref (gpointer object);
-GUM_API void gum_object_unref (gpointer object);
-
-#endif
-
 #ifdef G_NORETURN
 # define GUM_NORETURN G_NORETURN
 #else
@@ -600,9 +561,7 @@ GUM_API gpointer gum_cpu_context_get_return_value (GumCpuContext * self);
 GUM_API void gum_cpu_context_replace_return_value (GumCpuContext * self,
     gpointer value);
 
-#ifndef GUM_DIET
 GUM_API GType gum_address_get_type (void) G_GNUC_CONST;
-#endif
 
 G_END_DECLS
 

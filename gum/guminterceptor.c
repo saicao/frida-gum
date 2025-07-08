@@ -1,6 +1,8 @@
 /*
- * Copyright (C) 2008-2022 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2008-2025 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  * Copyright (C) 2008 Christian Berentsen <jc.berentsen@gmail.com>
+ * Copyright (C) 2024 Francesco Tamagni <mrmacete@protonmail.ch>
+ * Copyright (C) 2024 Yannis Juglaret <yjuglaret@mozilla.com>
  *
  * Licence: wxWindows Library Licence, Version 3.1
  */
@@ -11,6 +13,7 @@
 #include "guminterceptor-priv.h"
 #include "gumlibc.h"
 #include "gummemory.h"
+#include "gummetalarray.h"
 #include "gumprocess-priv.h"
 #include "gumtls.h"
 
@@ -54,11 +57,7 @@ struct _GumInterceptorTransaction
 
 struct _GumInterceptor
 {
-#ifndef GUM_DIET
   GObject parent;
-#else
-  GumObject parent;
-#endif
 
   GRecMutex mutex;
 
@@ -96,22 +95,15 @@ struct _GumUpdateTask
 struct _GumSuspendOperation
 {
   GumThreadId current_thread_id;
-  GQueue suspended_threads;
+  GumMetalArray suspended_threads;
 };
 
 struct _ListenerEntry
 {
-#ifndef GUM_DIET
   GumInvocationListenerInterface * listener_interface;
   GumInvocationListener * listener_instance;
-#else
-  union
-  {
-    GumInvocationListener * listener_interface;
-    GumInvocationListener * listener_instance;
-  };
-#endif
   gpointer function_data;
+  gboolean unignorable;
 };
 
 struct _InterceptorThreadContext
@@ -135,6 +127,7 @@ struct _GumInvocationStackEntry
   guint8 listener_invocation_data[GUM_MAX_LISTENERS_PER_FUNCTION]
       [GUM_MAX_LISTENER_DATA];
   gboolean calling_replacement;
+  gboolean only_invoke_unignorable_listeners;
   gint original_system_error;
 };
 
@@ -152,13 +145,11 @@ struct _ListenerInvocationState
   guint8 * invocation_data;
 };
 
-#ifndef GUM_DIET
 static void gum_interceptor_dispose (GObject * object);
 static void gum_interceptor_finalize (GObject * object);
 
 static void the_interceptor_weak_notify (gpointer data,
     GObject * where_the_object_was);
-#endif
 static GumReplaceReturn gum_interceptor_replace_with_type (
     GumInterceptor * self, GumInterceptorType type, gpointer function_address,
     gpointer replacement_function, gpointer replacement_data,
@@ -198,7 +189,7 @@ static gboolean gum_function_context_is_empty (
     GumFunctionContext * function_ctx);
 static void gum_function_context_add_listener (
     GumFunctionContext * function_ctx, GumInvocationListener * listener,
-    gpointer function_data);
+    gpointer function_data, gboolean unignorable);
 static void gum_function_context_remove_listener (
     GumFunctionContext * function_ctx, GumInvocationListener * listener);
 static void listener_entry_free (ListenerEntry * entry);
@@ -224,7 +215,7 @@ static void interceptor_thread_context_forget_listener_data (
     InterceptorThreadContext * self, GumInvocationListener * listener);
 static GumInvocationStackEntry * gum_invocation_stack_push (
     GumInvocationStack * stack, GumFunctionContext * function_ctx,
-    gpointer caller_ret_addr);
+    gpointer caller_ret_addr, gboolean only_invoke_unignorable_listeners);
 static gpointer gum_invocation_stack_pop (GumInvocationStack * stack);
 static GumInvocationStackEntry * gum_invocation_stack_peek_top (
     GumInvocationStack * stack);
@@ -237,9 +228,7 @@ static gboolean gum_interceptor_has (GumInterceptor * self,
 static gpointer gum_page_address_from_pointer (gpointer ptr);
 static gint gum_page_address_compare (gconstpointer a, gconstpointer b);
 
-#ifndef GUM_DIET
 G_DEFINE_TYPE (GumInterceptor, gum_interceptor, G_TYPE_OBJECT)
-#endif
 
 static GMutex _gum_interceptor_lock;
 static GumInterceptor * _the_interceptor = NULL;
@@ -252,8 +241,6 @@ static GumTlsKey gum_interceptor_guard_key;
 
 static GumInvocationStack _gum_interceptor_empty_stack = { NULL, 0 };
 
-#ifndef GUM_DIET
-
 static void
 gum_interceptor_class_init (GumInterceptorClass * klass)
 {
@@ -262,8 +249,6 @@ gum_interceptor_class_init (GumInterceptorClass * klass)
   object_class->dispose = gum_interceptor_dispose;
   object_class->finalize = gum_interceptor_finalize;
 }
-
-#endif
 
 void
 _gum_interceptor_init (void)
@@ -297,8 +282,10 @@ gum_interceptor_init (GumInterceptor * self)
 }
 
 static void
-gum_interceptor_do_dispose (GumInterceptor * self)
+gum_interceptor_dispose (GObject * object)
 {
+  GumInterceptor * self = GUM_INTERCEPTOR (object);
+
   GUM_INTERCEPTOR_LOCK (self);
   gum_interceptor_transaction_begin (&self->current_transaction);
   self->current_transaction.is_dirty = TRUE;
@@ -307,11 +294,15 @@ gum_interceptor_do_dispose (GumInterceptor * self)
 
   gum_interceptor_transaction_end (&self->current_transaction);
   GUM_INTERCEPTOR_UNLOCK (self);
+
+  G_OBJECT_CLASS (gum_interceptor_parent_class)->dispose (object);
 }
 
 static void
-gum_interceptor_do_finalize (GumInterceptor * self)
+gum_interceptor_finalize (GObject * object)
 {
+  GumInterceptor * self = GUM_INTERCEPTOR (object);
+
   gum_interceptor_transaction_destroy (&self->current_transaction);
 
   if (self->backend != NULL)
@@ -322,43 +313,9 @@ gum_interceptor_do_finalize (GumInterceptor * self)
   g_hash_table_unref (self->function_by_address);
 
   gum_code_allocator_free (&self->allocator);
-}
-
-#ifndef GUM_DIET
-
-static void
-gum_interceptor_dispose (GObject * object)
-{
-  gum_interceptor_do_dispose (GUM_INTERCEPTOR (object));
-
-  G_OBJECT_CLASS (gum_interceptor_parent_class)->dispose (object);
-}
-
-static void
-gum_interceptor_finalize (GObject * object)
-{
-  gum_interceptor_do_finalize (GUM_INTERCEPTOR (object));
 
   G_OBJECT_CLASS (gum_interceptor_parent_class)->finalize (object);
 }
-
-#else
-
-static void
-gum_interceptor_finalize (GumObject * object)
-{
-  GumInterceptor * self = GUM_INTERCEPTOR (object);
-
-  g_mutex_lock (&_gum_interceptor_lock);
-  if (_the_interceptor == self)
-    _the_interceptor = NULL;
-  g_mutex_unlock (&_gum_interceptor_lock);
-
-  gum_interceptor_do_dispose (self);
-  gum_interceptor_do_finalize (self);
-}
-
-#endif
 
 GumInterceptor *
 gum_interceptor_obtain (void)
@@ -367,7 +324,6 @@ gum_interceptor_obtain (void)
 
   g_mutex_lock (&_gum_interceptor_lock);
 
-#ifndef GUM_DIET
   if (_the_interceptor != NULL)
   {
     interceptor = GUM_INTERCEPTOR (g_object_ref (_the_interceptor));
@@ -380,28 +336,11 @@ gum_interceptor_obtain (void)
 
     interceptor = _the_interceptor;
   }
-#else
-  if (_the_interceptor != NULL)
-  {
-    interceptor = gum_object_ref (_the_interceptor);
-  }
-  else
-  {
-    _the_interceptor = g_new0 (GumInterceptor, 1);
-    _the_interceptor->parent.ref_count = 1;
-    _the_interceptor->parent.finalize = gum_interceptor_finalize;
-    gum_interceptor_init (_the_interceptor);
-
-    interceptor = _the_interceptor;
-  }
-#endif
 
   g_mutex_unlock (&_gum_interceptor_lock);
 
   return interceptor;
 }
-
-#ifndef GUM_DIET
 
 static void
 the_interceptor_weak_notify (gpointer data,
@@ -415,13 +354,12 @@ the_interceptor_weak_notify (gpointer data,
   g_mutex_unlock (&_gum_interceptor_lock);
 }
 
-#endif
-
 GumAttachReturn
 gum_interceptor_attach (GumInterceptor * self,
                         gpointer function_address,
                         GumInvocationListener * listener,
-                        gpointer listener_function_data)
+                        gpointer listener_function_data,
+                        GumAttachFlags flags)
 {
   GumAttachReturn result = GUM_ATTACH_OK;
   GumFunctionContext * function_ctx;
@@ -444,7 +382,7 @@ gum_interceptor_attach (GumInterceptor * self,
     goto already_attached;
 
   gum_function_context_add_listener (function_ctx, listener,
-      listener_function_data);
+      listener_function_data, (flags & GUM_ATTACH_FLAGS_UNIGNORABLE) != 0);
 
   goto beach;
 
@@ -503,13 +441,7 @@ gum_interceptor_detach (GumInterceptor * self,
       gum_function_context_remove_listener (function_ctx, listener);
 
       gum_interceptor_transaction_schedule_destroy (&self->current_transaction,
-          function_ctx,
-#ifndef GUM_DIET
-          g_object_unref, g_object_ref (listener)
-#else
-          gum_object_unref, gum_object_ref (listener)
-#endif
-      );
+          function_ctx, g_object_unref, g_object_ref (listener));
 
       if (gum_function_context_is_empty (function_ctx))
       {
@@ -704,6 +636,24 @@ gum_interceptor_get_current_invocation (void)
   return &entry->invocation_context;
 }
 
+GumInvocationContext *
+gum_interceptor_get_live_replacement_invocation (gpointer replacement_function)
+{
+  InterceptorThreadContext * interceptor_ctx;
+  GumInvocationStackEntry * entry;
+
+  interceptor_ctx = get_interceptor_thread_context ();
+  entry = gum_invocation_stack_peek_top (interceptor_ctx->stack);
+  if (entry == NULL)
+    return NULL;
+  if (!entry->calling_replacement)
+    return NULL;
+  if (replacement_function != entry->function_ctx->replacement_function)
+    return NULL;
+
+  return &entry->invocation_context;
+}
+
 GumInvocationStack *
 gum_interceptor_get_current_stack (void)
 {
@@ -807,6 +757,34 @@ gum_interceptor_restore (GumInvocationState * state)
   }
 
   g_array_set_size (stack, old_depth);
+}
+
+void
+gum_interceptor_with_lock_held (GumInterceptor * self,
+                                GumInterceptorLockedFunc func,
+                                gpointer user_data)
+{
+  GUM_INTERCEPTOR_LOCK (self);
+  func (user_data);
+  GUM_INTERCEPTOR_UNLOCK (self);
+}
+
+gboolean
+gum_interceptor_is_locked (GumInterceptor * self)
+{
+  if (!g_rec_mutex_trylock (&self->mutex))
+    return TRUE;
+
+  GUM_INTERCEPTOR_UNLOCK (self);
+  return FALSE;
+}
+
+gsize
+gum_interceptor_detect_hook_size (gconstpointer code,
+                                  csh capstone,
+                                  cs_insn * insn)
+{
+  return _gum_interceptor_backend_detect_hook_size (code, capstone, insn);
 }
 
 gpointer
@@ -1042,14 +1020,18 @@ gum_interceptor_transaction_end (GumInterceptorTransaction * self)
     if (rwx_supported || !code_segment_supported)
     {
       GumPageProtection protection;
-      GumSuspendOperation suspend_op = { 0, G_QUEUE_INIT };
+      GumSuspendOperation suspend_op = { 0, };
 
       protection = rwx_supported ? GUM_PAGE_RWX : GUM_PAGE_RW;
 
       if (!rwx_supported)
       {
+        gum_metal_array_init (&suspend_op.suspended_threads,
+            sizeof (GumThreadId));
+
         suspend_op.current_thread_id = gum_process_get_current_thread_id ();
-        _gum_process_enumerate_threads (gum_maybe_suspend_thread, &suspend_op);
+        _gum_process_enumerate_threads (gum_maybe_suspend_thread, &suspend_op,
+            GUM_THREAD_FLAGS_NONE);
       }
 
       for (cur = addresses; cur != NULL; cur = cur->next)
@@ -1082,6 +1064,13 @@ gum_interceptor_transaction_end (GumInterceptorTransaction * self)
 
       if (!rwx_supported)
       {
+        /*
+         * We don't bother restoring the protection on RWX systems, as we would
+         * have to determine the old protection to be able to do so safely.
+         *
+         * While we could easily do that, it would add overhead, but it's not
+         * really clear that it would have any tangible upsides.
+         */
         for (cur = addresses; cur != NULL; cur = cur->next)
         {
           gpointer target_page = cur->data;
@@ -1099,17 +1088,23 @@ gum_interceptor_transaction_end (GumInterceptorTransaction * self)
 
       if (!rwx_supported)
       {
-        gpointer raw_id;
+        guint num_suspended, i;
 
-        while (
-            (raw_id = g_queue_pop_tail (&suspend_op.suspended_threads)) != NULL)
+        num_suspended = suspend_op.suspended_threads.length;
+
+        for (i = 0; i != num_suspended; i++)
         {
-          gum_thread_resume (GPOINTER_TO_SIZE (raw_id), NULL);
+          GumThreadId * raw_id = gum_metal_array_element_at (
+              &suspend_op.suspended_threads, i);
+
+          gum_thread_resume (*raw_id, NULL);
 #ifdef HAVE_DARWIN
-          mach_port_mod_refs (mach_task_self (), GPOINTER_TO_SIZE (raw_id),
+          mach_port_mod_refs (mach_task_self (), *raw_id,
               MACH_PORT_RIGHT_SEND, -1);
 #endif
         }
+
+        gum_metal_array_free (&suspend_op.suspended_threads);
       }
     }
     else
@@ -1211,6 +1206,7 @@ gum_maybe_suspend_thread (const GumThreadDetails * details,
                           gpointer user_data)
 {
   GumSuspendOperation * op = user_data;
+  GumThreadId * suspended_id;
 
   if (details->id == op->current_thread_id)
     goto skip;
@@ -1221,7 +1217,8 @@ gum_maybe_suspend_thread (const GumThreadDetails * details,
 #ifdef HAVE_DARWIN
   mach_port_mod_refs (mach_task_self (), details->id, MACH_PORT_RIGHT_SEND, 1);
 #endif
-  g_queue_push_tail (&op->suspended_threads, GSIZE_TO_POINTER (details->id));
+  suspended_id = gum_metal_array_append (&op->suspended_threads);
+  *suspended_id = details->id;
 
 skip:
   return TRUE;
@@ -1349,18 +1346,18 @@ gum_function_context_is_empty (GumFunctionContext * function_ctx)
 static void
 gum_function_context_add_listener (GumFunctionContext * function_ctx,
                                    GumInvocationListener * listener,
-                                   gpointer function_data)
+                                   gpointer function_data,
+                                   gboolean unignorable)
 {
   ListenerEntry * entry;
   GPtrArray * old_entries, * new_entries;
   guint i;
 
   entry = g_slice_new (ListenerEntry);
-#ifndef GUM_DIET
   entry->listener_interface = GUM_INVOCATION_LISTENER_GET_IFACE (listener);
-#endif
   entry->listener_instance = listener;
   entry->function_data = function_data;
+  entry->unignorable = unignorable;
 
   old_entries =
       (GPtrArray *) g_atomic_pointer_get (&function_ctx->listener_entries);
@@ -1380,9 +1377,10 @@ gum_function_context_add_listener (GumFunctionContext * function_ctx,
       (GDestroyNotify) g_ptr_array_unref, old_entries);
 
   if (entry->listener_interface->on_leave != NULL)
-  {
     function_ctx->has_on_leave_listener = TRUE;
-  }
+
+  if (unignorable)
+    function_ctx->has_unignorable_listener = TRUE;
 }
 
 static void
@@ -1396,7 +1394,7 @@ gum_function_context_remove_listener (GumFunctionContext * function_ctx,
                                       GumInvocationListener * listener)
 {
   ListenerEntry ** slot;
-  gboolean has_on_leave_listener;
+  gboolean has_on_leave_listener, has_unignorable_listener;
   GPtrArray * listener_entries;
   guint i;
 
@@ -1406,18 +1404,24 @@ gum_function_context_remove_listener (GumFunctionContext * function_ctx,
   *slot = NULL;
 
   has_on_leave_listener = FALSE;
+  has_unignorable_listener = FALSE;
   listener_entries =
       (GPtrArray *) g_atomic_pointer_get (&function_ctx->listener_entries);
   for (i = 0; i != listener_entries->len; i++)
   {
     ListenerEntry * entry = g_ptr_array_index (listener_entries, i);
-    if (entry != NULL && entry->listener_interface->on_leave != NULL)
-    {
+
+    if (entry == NULL)
+      continue;
+
+    if (entry->listener_interface->on_leave != NULL)
       has_on_leave_listener = TRUE;
-      break;
-    }
+
+    if (entry->unignorable)
+      has_unignorable_listener = TRUE;
   }
   function_ctx->has_on_leave_listener = has_on_leave_listener;
+  function_ctx->has_unignorable_listener = has_unignorable_listener;
 }
 
 static gboolean
@@ -1467,7 +1471,7 @@ gum_function_context_find_taken_listener_slot (
   return NULL;
 }
 
-void
+gboolean
 _gum_function_context_begin_invocation (GumFunctionContext * function_ctx,
                                         GumCpuContext * cpu_context,
                                         gpointer * caller_ret_addr,
@@ -1480,7 +1484,8 @@ _gum_function_context_begin_invocation (GumFunctionContext * function_ctx,
   GumInvocationContext * invocation_ctx = NULL;
   gint system_error;
   gboolean invoke_listeners = TRUE;
-  gboolean will_trap_on_leave;
+  gboolean only_invoke_unignorable_listeners = FALSE;
+  gboolean will_trap_on_leave = FALSE;
 
   g_atomic_int_inc (&function_ctx->trampoline_usage_counter);
 
@@ -1527,18 +1532,24 @@ _gum_function_context_begin_invocation (GumFunctionContext * function_ctx,
     invoke_listeners = (interceptor_ctx->ignore_level <= 0);
   }
 
+  if (!invoke_listeners && function_ctx->has_unignorable_listener)
+  {
+    invoke_listeners = TRUE;
+    only_invoke_unignorable_listeners = TRUE;
+  }
+
   will_trap_on_leave = function_ctx->replacement_function != NULL ||
       (invoke_listeners && function_ctx->has_on_leave_listener);
   if (will_trap_on_leave)
   {
     stack_entry = gum_invocation_stack_push (stack, function_ctx,
-        *caller_ret_addr);
+        *caller_ret_addr, only_invoke_unignorable_listeners);
     invocation_ctx = &stack_entry->invocation_context;
   }
   else if (invoke_listeners)
   {
     stack_entry = gum_invocation_stack_push (stack, function_ctx,
-        function_ctx->function_address);
+        function_ctx->function_address, only_invoke_unignorable_listeners);
     invocation_ctx = &stack_entry->invocation_context;
   }
 
@@ -1566,22 +1577,20 @@ _gum_function_context_begin_invocation (GumFunctionContext * function_ctx,
       if (listener_entry == NULL)
         continue;
 
+      if (only_invoke_unignorable_listeners && !listener_entry->unignorable)
+        continue;
+
       state.point_cut = GUM_POINT_ENTER;
       state.entry = listener_entry;
       state.interceptor_ctx = interceptor_ctx;
       state.invocation_data = stack_entry->listener_invocation_data[i];
       invocation_ctx->backend->data = &state;
 
-#ifndef GUM_DIET
       if (listener_entry->listener_interface->on_enter != NULL)
       {
         listener_entry->listener_interface->on_enter (
             listener_entry->listener_instance, invocation_ctx);
       }
-#else
-      gum_invocation_listener_on_enter (listener_entry->listener_instance,
-          invocation_ctx);
-#endif
     }
 
     system_error = invocation_ctx->system_error;
@@ -1617,15 +1626,13 @@ _gum_function_context_begin_invocation (GumFunctionContext * function_ctx,
     *next_hop = function_ctx->on_invoke_trampoline;
   }
 
+bypass:
   if (!will_trap_on_leave)
   {
     g_atomic_int_dec_and_test (&function_ctx->trampoline_usage_counter);
   }
 
-  return;
-
-bypass:
-  g_atomic_int_dec_and_test (&function_ctx->trampoline_usage_counter);
+  return will_trap_on_leave;
 }
 
 void
@@ -1638,6 +1645,7 @@ _gum_function_context_end_invocation (GumFunctionContext * function_ctx,
   GumInvocationStackEntry * stack_entry;
   GumInvocationContext * invocation_ctx;
   GPtrArray * listener_entries;
+  gboolean only_invoke_unignorable_listeners;
   guint i;
 
 #ifdef HAVE_WINDOWS
@@ -1672,6 +1680,8 @@ _gum_function_context_end_invocation (GumFunctionContext * function_ctx,
 
   listener_entries =
       (GPtrArray *) g_atomic_pointer_get (&function_ctx->listener_entries);
+  only_invoke_unignorable_listeners =
+      stack_entry->only_invoke_unignorable_listeners;
   for (i = 0; i != listener_entries->len; i++)
   {
     ListenerEntry * listener_entry;
@@ -1681,22 +1691,20 @@ _gum_function_context_end_invocation (GumFunctionContext * function_ctx,
     if (listener_entry == NULL)
       continue;
 
+    if (only_invoke_unignorable_listeners && !listener_entry->unignorable)
+      continue;
+
     state.point_cut = GUM_POINT_LEAVE;
     state.entry = listener_entry;
     state.interceptor_ctx = interceptor_ctx;
     state.invocation_data = stack_entry->listener_invocation_data[i];
     invocation_ctx->backend->data = &state;
 
-#ifndef GUM_DIET
     if (listener_entry->listener_interface->on_leave != NULL)
     {
       listener_entry->listener_interface->on_leave (
           listener_entry->listener_instance, invocation_ctx);
     }
-#else
-    gum_invocation_listener_on_leave (listener_entry->listener_instance,
-        invocation_ctx);
-#endif
   }
 
   gum_thread_set_system_error (invocation_ctx->system_error);
@@ -1972,7 +1980,8 @@ interceptor_thread_context_forget_listener_data (
 static GumInvocationStackEntry *
 gum_invocation_stack_push (GumInvocationStack * stack,
                            GumFunctionContext * function_ctx,
-                           gpointer caller_ret_addr)
+                           gpointer caller_ret_addr,
+                           gboolean only_invoke_unignorable_listeners)
 {
   GumInvocationStackEntry * entry;
   GumInvocationContext * ctx;
@@ -1982,6 +1991,7 @@ gum_invocation_stack_push (GumInvocationStack * stack,
       &g_array_index (stack, GumInvocationStackEntry, stack->len - 1);
   entry->function_ctx = function_ctx;
   entry->caller_ret_addr = caller_ret_addr;
+  entry->only_invoke_unignorable_listeners = only_invoke_unignorable_listeners;
 
   ctx = &entry->invocation_context;
   ctx->function = gum_sign_code_pointer (function_ctx->function_address);

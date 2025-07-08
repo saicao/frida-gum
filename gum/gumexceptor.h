@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015-2022 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2015-2025 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  * Copyright (C) 2020 Francesco Tamagni <mrmacete@protonmail.ch>
  *
  * Licence: wxWindows Library Licence, Version 3.1
@@ -15,23 +15,18 @@
 G_BEGIN_DECLS
 
 #define GUM_TYPE_EXCEPTOR (gum_exceptor_get_type ())
-GUM_DECLARE_FINAL_TYPE (GumExceptor, gum_exceptor, GUM, EXCEPTOR, GObject)
+G_DECLARE_FINAL_TYPE (GumExceptor, gum_exceptor, GUM, EXCEPTOR, GObject)
 
-#if defined (G_OS_WIN32) || defined (__APPLE__)
+#if defined (GUM_GIR_COMPILATION)
+  typedef int GumExceptorNativeJmpBuf;
+#elif defined (G_OS_WIN32) || defined (G_OS_NONE) || defined (__APPLE__)
 # define GUM_NATIVE_SETJMP(env) setjmp (env)
 # define GUM_NATIVE_LONGJMP longjmp
-# ifndef GUM_GIR_COMPILATION
   typedef jmp_buf GumExceptorNativeJmpBuf;
-# endif
 #else
 # define GUM_NATIVE_SETJMP(env) sigsetjmp (env, TRUE)
 # define GUM_NATIVE_LONGJMP siglongjmp
-# ifndef GUM_GIR_COMPILATION
   typedef sigjmp_buf GumExceptorNativeJmpBuf;
-# endif
-#endif
-#ifdef GUM_GIR_COMPILATION
-typedef int GumExceptorNativeJmpBuf;
 #endif
 
 typedef struct _GumExceptionDetails GumExceptionDetails;
@@ -97,9 +92,9 @@ GUM_API void gum_exceptor_add (GumExceptor * self, GumExceptionHandler func,
 GUM_API void gum_exceptor_remove (GumExceptor * self, GumExceptionHandler func,
     gpointer user_data);
 
-#if defined (_MSC_VER) && GLIB_SIZEOF_VOID_P == 8
+#if defined (_MSC_VER) && defined (HAVE_I386) && GLIB_SIZEOF_VOID_P == 8
 /*
- * On MSVC/64-bit setjmp() is actually an intrinsic that calls _setjmp() with a
+ * On MSVC/x86_64 setjmp() is actually an intrinsic that calls _setjmp() with a
  * a hidden second argument specifying the frame pointer. This makes sense when
  * the longjmp() is guaranteed to happen from code we control, but is not
  * reliable otherwise.
