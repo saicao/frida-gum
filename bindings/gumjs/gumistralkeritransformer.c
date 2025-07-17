@@ -14,11 +14,11 @@ const guint64 GURAD_MAGIC = 0xdeadbeeeeeeeeeef;
 static void gum_stalker_itransformer_iface_init(gpointer g_iface,
                                                 gpointer iface_data);
 static void
-gum_stalker_itransformer_transform_block(GumStalkerItransformer *transformer,
+gum_stalker_itransformer_transform_block(GumStalkerTransformer *transformer,
                                          GumStalkerIterator *iterator,
                                          GumStalkerOutput *output);
-static void gum_stalker_itransformer_dispose(GumStalkerItransformer *self);
-static void gum_stalker_itransformer_finalize(GumStalkerItransformer *self);
+static void gum_stalker_itransformer_dispose(GObject *self);
+static void gum_stalker_itransformer_finalize(GObject *self);
 
 inline static void write_bytes_to_stream(GOutputStream *stream, gchar *bytes,
                                          gsize size) {
@@ -121,7 +121,9 @@ static gsize drain_buffer(GumStalkerItransformer *self) {
   return n_write;
 }
 static gboolean gum_try_do_sink(GumExceptionDetails *details,
-                                GumStalkerItransformer *self) {
+                                gpointer user_data) {
+  
+  GumStalkerItransformer *self = GUM_STALKER_ITRANSFORMER(user_data);
   // g_debug("gum_try_do_sink at %p %d", details->address, details->type);
   // g_log(G_LOG_DOMAIN, G_LOG_LEVEL_DEBUG | G_LOG_FLAG_RECURSION,
   //       "gum_try_do_sink at %p %d");
@@ -130,7 +132,7 @@ static gboolean gum_try_do_sink(GumExceptionDetails *details,
     goto ret;
   }
   // 所有的访问都是对齐的,darwin内核应该不支持不对齐访问
-  GumAddress address = details->memory.address;
+  GumAddress address = (GumAddress)details->memory.address;
   if (address != (GumAddress)self->guard_page_addr) {
     // g_debug("address %p != %p", address, self->guard_page_addr);
     goto ret;
@@ -181,7 +183,7 @@ void gum_stalker_itransformer_set_buf(GumStalkerItransformer *self,
   self->buf_offset = buf;
   self->num_buf_pages = n_page;
   gum_mprotect(gurad_page, page_size, GUM_PAGE_READ);
-  self->guard_page_addr = (GumAddress)gurad_page;
+  self->guard_page_addr = gurad_page;
   g_debug("set buffer %p %p", buf, gurad_page);
   gum_exceptor_add(self->exceptor, gum_try_do_sink, self);
 };
@@ -194,14 +196,18 @@ void gum_stalker_itransformer_sink(GumStalkerItransformer *self,
   g_object_ref(estream);
 };
 
-static void gum_stalker_itransformer_dispose(GumStalkerItransformer *self) {
+static void gum_stalker_itransformer_dispose(GObject *object) {
+  GumStalkerItransformer * self;
+  self = GUM_STALKER_ITRANSFORMER (object);
   g_debug("transformer dispose");
   drain_buffer(self);
   g_clear_object(&self->exceptor);
   g_clear_object(&self->bstream);
   g_clear_object(&self->estream);
 };
-static void gum_stalker_itransformer_finalize(GumStalkerItransformer *self) {
+static void gum_stalker_itransformer_finalize(GObject *object) {
+  GumStalkerItransformer * self;
+  self = GUM_STALKER_ITRANSFORMER (object);
   g_debug("transformer finalize");
   g_array_free(self->block_specs, TRUE);
 };
@@ -215,15 +221,15 @@ static void gum_stalker_itransformer_iface_init(gpointer g_iface,
 static inline gboolean is_scartch_register(aarch64_reg reg) {
   return reg >= SCRATCH_REG_BOTTOM && reg <= SCRATCH_REG_TOP;
 };
-static void gum_stalker_itransformer_starting(GumCpuContext *cpu_context,
-                                              GumStalkerItransformer *tm);
+static void gum_stalker_itransformer_starting(GumCpuContext * cpu_context,
+    gpointer user_data);
 static aarch64_reg register_to_full_size_register(aarch64_reg reg);
 
 static void reslove_regs(GumStalkerItransformer *tm, cs_regs regs_read,
                          uint8_t num_regs_read, cs_regs regs_written,
                          uint8_t num_regs_written);
 static void on_block_ctx(GumCpuContext *cpu_context,
-                         GumStalkerItransformer *tm);
+                         gpointer user_data);
 static gboolean itransformer_try_write_context(GumStalkerItransformer *tm,
                                                GumStalkerIterator *iterator,
                                                GumArm64Writer *cw);
@@ -233,22 +239,23 @@ void save_register(GumArm64Writer *cw, aarch64_reg tm_reg, aarch64_reg reg) {
       G_STRUCT_OFFSET(GumStalkerItransformer, saved_regs) +
           SCRATCH_REG_OFFSET(reg));
 };
-static void gum_stalker_itransformer_starting(GumCpuContext *cpu_context,
-                                              GumStalkerItransformer *tm) {
-  if (tm->state != ITRACE_STATE_STARTING) {
+static void gum_stalker_itransformer_starting(GumCpuContext * cpu_context,
+    gpointer user_data) {
+  GumStalkerItransformer *self = GUM_STALKER_ITRANSFORMER(user_data);
+  if (self->state != ITRACE_STATE_STARTING) {
     return;
   };
 
   ImsgMeta meta = {IMSG_META_MAGIC, 2, 8};
-  write_bytes_to_stream(tm->estream, (gchar *)&meta, sizeof(ImsgMeta));
+  write_bytes_to_stream(self->estream, (gchar *)&meta, sizeof(ImsgMeta));
   gchar data[8] = {0};
-  write_bytes_to_stream(tm->estream, data, 8);
-  memcpy(tm->saved_regs, cpu_context->x + (SCRATCH_REG_BOTTOM - AArch64_REG_X0),
-         sizeof(tm->saved_regs));
-  tm->state = ITRACE_STATE_STARTED;
+  write_bytes_to_stream(self->estream, data, 8);
+  memcpy(self->saved_regs, cpu_context->x + (SCRATCH_REG_BOTTOM - AArch64_REG_X0),
+         sizeof(self->saved_regs));
+  self->state = ITRACE_STATE_STARTED;
   ImsgContext ctx = {IMSG_CONTEXT, *cpu_context, 0, 0, 0xFFFFFFFFFFFFFFFF};
 
-  write_bytes_to_stream(tm->estream, (gchar *)&ctx, sizeof(ImsgContext));
+  write_bytes_to_stream(self->estream, (gchar *)&ctx, sizeof(ImsgContext));
   g_debug("gum_stalker_itransformer_starting");
   dump_imsg_context(&ctx);
 };
@@ -547,41 +554,41 @@ static inline void end_block_tranform(GumStalkerItransformer *self,
   }
   free_tf_reg(self, TRANSFROMER_REG_IDX);
 }
-static gum_stalker_itransformer_keep_writes(GumStalkerItransformer *transformer,
+static void gum_stalker_itransformer_keep_writes(GumStalkerItransformer *self,
                                             GumStalkerIterator *iterator,
                                             const cs_insn *insn) {
   cs_regs regs_read, regs_written;
   uint8_t num_regs_read, num_regs_written;
 
-  regs_access(transformer->capstone, insn, regs_read, &num_regs_read,
+  regs_access(self->capstone, insn, regs_read, &num_regs_read,
               regs_written, &num_regs_written);
-  reslove_regs(transformer, regs_read, num_regs_read, regs_written,
+  reslove_regs(self, regs_read, num_regs_read, regs_written,
                num_regs_written);
   gum_stalker_iterator_keep(iterator);
 
-  istalker_save_regs(transformer, regs_written, num_regs_written,
-                     REG_BUF_OFFSET(transformer), insn->address);
+  istalker_save_regs(self, regs_written, num_regs_written,
+                     REG_BUF_OFFSET(self), insn->address);
 };
 
-static inline gboolean handle_svc(GumStalkerItransformer *transformer,
-                                  GumStalkerIterator *iterator,
-                                  const cs_insn *insn) {
+// static inline gboolean handle_svc(GumStalkerItransformer *transformer,
+//                                   GumStalkerIterator *iterator,
+//                                   const cs_insn *insn) {
 
-  const uint32_t *last_insn = insn->address - 4;
+//   const uint32_t *last_insn = insn->address - 4;
 
-  // // mov x16,0x1
-  // if (*last_insn == 0xd2800030) {
-  //   g_debug("handle exit");
-  //   ImsgTermaintingBlock tb = {0};
-  //   tb.type = IMSG_BLOCK_TERM;
-  //   tb.id = transformer->current_block.id;
-  //   tb.meta_offset = transformer->current_block.meta_size;
-  //   tb.stop_address = insn->address;
-  //   write_bytes_to_stream(transformer->bstream, (char *)&tb, sizeof(tb));
-  //   gum_arm64_writer_put_brk_imm(transformer->cw, 1234);
-  // }
-  // return false;
-}
+//   // // mov x16,0x1
+//   // if (*last_insn == 0xd2800030) {
+//   //   g_debug("handle exit");
+//   //   ImsgTermaintingBlock tb = {0};
+//   //   tb.type = IMSG_BLOCK_TERM;
+//   //   tb.id = transformer->current_block.id;
+//   //   tb.meta_offset = transformer->current_block.meta_size;
+//   //   tb.stop_address = insn->address;
+//   //   write_bytes_to_stream(transformer->bstream, (char *)&tb, sizeof(tb));
+//   //   gum_arm64_writer_put_brk_imm(transformer->cw, 1234);
+//   // }
+//   // return false;
+// }
 /**
  * @brief
  * 当 transformer
@@ -595,17 +602,18 @@ static inline gboolean handle_svc(GumStalkerItransformer *transformer,
  * @param output
  */
 static void
-gum_stalker_itransformer_transform_block(GumStalkerItransformer *transformer,
+gum_stalker_itransformer_transform_block(GumStalkerTransformer *transformer,
                                          GumStalkerIterator *iterator,
                                          GumStalkerOutput *output) {
+  GumStalkerItransformer *self = GUM_STALKER_ITRANSFORMER(transformer);
   g_debug("============transform block %d=======",
           transformer->current_block.id);
   const cs_insn *insn;
-  ImsgBlockCompile *current_block = &transformer->current_block;
-  transformer->iterator = iterator;
-  transformer->cw = output->writer.arm64;
+  ImsgBlockCompile *current_block = &self->current_block;
+  self->iterator = iterator;
+  self->cw = output->writer.arm64;
   GumArm64Writer *cw = output->writer.arm64;
-  transformer->capstone = gum_stalker_iterator_get_capstone(iterator);
+  self->capstone = gum_stalker_iterator_get_capstone(iterator);
   // transformer->current_block.compiled_address =
   //     (GumAddress)gum_arm64_writer_cur(cw);
   guint32 instr_count = 0;
@@ -618,44 +626,44 @@ gum_stalker_itransformer_transform_block(GumStalkerItransformer *transformer,
     instr_count++;
     g_debug("transform %llx:%s %s", insn->address, insn->mnemonic,
             insn->op_str);
-    if (transformer->state == ITRACE_STATE_CREATED) {
+    if (self->state == ITRACE_STATE_CREATED) {
       gum_stalker_iterator_put_callout(
-          iterator, gum_stalker_itransformer_starting, transformer, NULL);
-      transformer->state = ITRACE_STATE_STARTING;
+          iterator, gum_stalker_itransformer_starting, self, NULL);
+      self->state = ITRACE_STATE_STARTING;
     }
-    if (instr_count == 1 && transformer->block_done) {
+    if (instr_count == 1 && self->block_done) {
       // if (current_block->id == 18) {
 
       //   gum_arm64_writer_put_brk_imm(cw, 1234);
       // }
-      transformer->block_done = FALSE;
+      self->block_done = FALSE;
       current_block->address = insn->address;
       // 应该永远是x28， ofset x27
-      aquire_tf_base_reg(transformer);
-      itransformer_try_write_context(transformer, iterator, cw);
+      aquire_tf_base_reg(self);
+      itransformer_try_write_context(self, iterator, cw);
       gum_arm64_writer_put_ldr_reg_reg_offset(
-          cw, REG_BUF_OFFSET(transformer), REG_TRANSFROMER(transformer),
+          cw, REG_BUF_OFFSET(self), REG_TRANSFROMER(self),
           G_STRUCT_OFFSET(GumStalkerItransformer, buf_offset));
 
-      aarch64_reg value_reg = allocate_tmp_reg(transformer);
+      aarch64_reg value_reg = allocate_tmp_reg(self);
       // align_up_register(cw, REG_BUF_OFFSET(transformer), 16);
 
       gum_arm64_writer_put_mov_imm(cw, value_reg, IMSG_BLOCK_EXEC);
       gum_arm64_writer_put_str_reg_reg_offset_mode(
-          cw, value_reg, REG_BUF_OFFSET(transformer), 8, GUM_INDEX_POST_ADJUST);
+          cw, value_reg, REG_BUF_OFFSET(self), 8, GUM_INDEX_POST_ADJUST);
       gum_arm64_writer_put_ldr_reg_u64(cw, value_reg, current_block->id);
       gum_arm64_writer_put_str_reg_reg_offset_mode(
-          cw, value_reg, REG_BUF_OFFSET(transformer), 8, GUM_INDEX_POST_ADJUST);
-      free_tmp_reg(transformer, value_reg);
+          cw, value_reg, REG_BUF_OFFSET(self), 8, GUM_INDEX_POST_ADJUST);
+      free_tmp_reg(self, value_reg);
     }
-    if (is_control_flow(transformer->capstone, insn)) { // control flow
+    if (is_control_flow(self->capstone, insn)) { // control flow
       g_debug("get control flow");
       // gum_arm64_writer_put_ldr_reg_value(cw, reg_val_offset_ref,
       // transformer->reg_val_offset);
       current_block->size = insn->address + insn->size - current_block->address;
-      end_block_tranform(transformer, cw);
+      end_block_tranform(self, cw);
       gum_stalker_iterator_keep(iterator);
-      transformer->block_done = true;
+      self->block_done = true;
       continue;
     }
     // if (insn->id == AArch64_INS_SVC) {
@@ -666,20 +674,20 @@ gum_stalker_itransformer_transform_block(GumStalkerItransformer *transformer,
     cs_regs regs_read, regs_written;
     uint8_t num_regs_read, num_regs_written;
 
-    regs_access(transformer->capstone, insn, regs_read, &num_regs_read,
+    regs_access(self->capstone, insn, regs_read, &num_regs_read,
                 regs_written, &num_regs_written);
-    reslove_regs(transformer, regs_read, num_regs_read, regs_written,
+    reslove_regs(self, regs_read, num_regs_read, regs_written,
                  num_regs_written);
     gum_stalker_iterator_keep(iterator);
 
-    istalker_save_regs(transformer, regs_written, num_regs_written,
-                       REG_BUF_OFFSET(transformer), insn->address);
+    istalker_save_regs(self, regs_written, num_regs_written,
+                       REG_BUF_OFFSET(self), insn->address);
   }
 
   // transformer->current_block.compiled_size = gum_arm64_writer_offset(cw);
 
-  if (transformer->block_done) {
-    istalker_write_block_compile(transformer);
+  if (self->block_done) {
+    istalker_write_block_compile(self);
     current_block->type = IMSG_BLOCK_COMPILE;
     current_block->meta_size = 0;
     // current_block->spec_size=0;
@@ -694,7 +702,8 @@ gum_stalker_itransformer_transform_block(GumStalkerItransformer *transformer,
 }
 
 static void on_block_ctx(GumCpuContext *cpu_context,
-                         GumStalkerItransformer *tm) {
+                         gpointer user_data) {
+  GumStalkerItransformer *tm = GUM_STALKER_ITRANSFORMER(user_data);
   g_debug("on block ctx");
   // 这里处理的比较低效，破坏了以page为单位的写
   if (tm->buf_offset + sizeof(ImsgContext) > tm->guard_page_addr) {

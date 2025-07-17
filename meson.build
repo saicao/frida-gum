@@ -387,6 +387,7 @@ gio_dep_native = dependency('gio-2.0', native: true)
 capstone_arch_mappings = {
   'x86_64': 'x86',
   's390x': 'sysz',
+  'arm64':'aarch64',
 }
 capstone_options = [
   'profile=' + (diet ? 'tiny' : 'full'),
@@ -394,7 +395,7 @@ capstone_options = [
   'x86_att_disable=true',
   'cli=disabled',
 ]
-capstone_dep = dependency('capstone', version: '>=5.0.0', default_options: capstone_options)
+capstone_dep = dependency('capstone', version: '>=6.0.0', default_options: capstone_options)
 
 lzma_dep = dependency('liblzma', required: build_tests)
 if lzma_dep.found()
@@ -412,7 +413,7 @@ else
 # error GLib is static
 #endif
 '''
-  have_shared_glib = cc.compiles(glib_flavor_src, name: 'compiling with shared GLib', dependencies: [glib_dep])
+  have_shared_glib = cc.compiles(glib_flavor_src, name: 'compiling with shared GLib', dependencies: [glib_dep, gmodule_dep,gio_dep])
 endif
 if not static and have_shared_glib and not meson.is_cross_build()
   gir_scanner = find_program('g-ir-scanner', required: false)

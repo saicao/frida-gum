@@ -607,10 +607,6 @@ GUMJS_DEFINE_FUNCTION (gumjs_stalker_followi)
   gsize dump_interval;
   parent = gumjs_get_parent_module (core);
   stalker = _gum_quick_stalker_get (parent);
-  // so.core = core;
-  // so.main_context = gum_script_scheduler_get_js_context (core->scheduler);
-  // so.queue_capacity = parent->queue_capacity;
-  // so.queue_drain_interval = parent->queue_drain_interval;
 
   if (!_gum_quick_args_parse (args, "ZZZ", &thread_id,&n_page,&dump_interval))
     return JS_EXCEPTION;

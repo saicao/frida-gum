@@ -377,7 +377,7 @@ gum_enum_h = gum_enums[1]
 gum_enums_dep = declare_dependency(sources: [gum_enum_h])
 
 gum_public_deps = [glib_dep, gobject_dep, capstone_dep, gum_enums_dep]
-gum_internal_deps = [glib_dep, gobject_dep, capstone_dep, threads_dep]
+gum_internal_deps = [glib_dep, gobject_dep,gio_dep, capstone_dep, threads_dep]
 if ffi_dep.found()
   gum_internal_deps += ffi_dep
 endif

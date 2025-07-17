@@ -59,7 +59,7 @@ typedef struct _ImsgMeta ImsgMeta;
 typedef struct _ImsgTermaintingBlock ImsgTermaintingBlock;
 #define GUM_TYPE_STALKER_ITRANSFORMER (gum_stalker_itransformer_get_type())
 
-GUM_DECLARE_FINAL_TYPE(GumStalkerItransformer, gum_stalker_itransformer, GUM,
+G_DECLARE_FINAL_TYPE(GumStalkerItransformer, gum_stalker_itransformer, GUM,
                        STALKER_ITRANSFORMER, GObject)
 enum _ITraceState {
   ITRACE_STATE_CREATED,
