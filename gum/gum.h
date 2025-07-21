@@ -57,6 +57,7 @@ GUM_API void gum_deinit_embedded (void);
 GUM_API void gum_prepare_to_fork (void);
 GUM_API void gum_recover_from_fork_in_parent (void);
 GUM_API void gum_recover_from_fork_in_child (void);
-GUM_API const gchar *gum_get_home_path() ;
+
 G_END_DECLS
+
 #endif

@@ -834,21 +834,6 @@ static void gum_dump_exec_block(csh capstone,GumExecBlock * block)
   g_debug("-----------------------------");
 }
 
-
-
-// static void gum_dump_inst(GumExecCtx * ctx,guint8 * strat,gsize size);
-
-// void gum_dump_inst(GumExecCtx * ctx,guint8 * strat,gsize size){
-//     csh cap=ctx->relocator.capstone;
-//     cs_insn * insn;
-//     g_debug("======dump inst base:%llx size:%lu=======",strat,size);
-//     gsize count=cs_disasm(cap ,strat, size, strat, 0, &insn);
-//     for(gsize i=0;i<count;i++){
-//       g_debug("%llx:%s %s",insn[i].address,insn[i].mnemonic,insn[i].op_str);
-//     }
-//     cs_free( insn, count);
-//     g_debug("======dump inst end=======");
-// }
 gboolean
 gum_stalker_is_supported (void)
 {

@@ -594,62 +594,71 @@ GUMJS_DEFINE_FUNCTION (gumjs_stalker_follow)
 
   return JS_UNDEFINED;
 }
-
-GUMJS_DEFINE_FUNCTION (gumjs_stalker_followi)
-{
-  GumQuickStalker * parent;
-  GumStalker * stalker;
+GUMJS_DEFINE_FUNCTION(gumjs_stalker_followi) {
+  GumQuickStalker *parent;
+  GumStalker *stalker;
   GumThreadId thread_id;
   // GumQuickEventSinkOptions so;
-  GumStalkerTransformer * transformer;
-  GumEventSink * sink=NULL;
+  GumStalkerTransformer *transformer;
+  GumEventSink *sink = NULL;
   gsize n_page;
   gsize dump_interval;
-  parent = gumjs_get_parent_module (core);
-  stalker = _gum_quick_stalker_get (parent);
+  parent = gumjs_get_parent_module(core);
+  stalker = _gum_quick_stalker_get(parent);
 
-  if (!_gum_quick_args_parse (args, "ZZZ", &thread_id,&n_page,&dump_interval))
+  if (!_gum_quick_args_parse(args, "ZZZ", &thread_id, &n_page, &dump_interval))
     return JS_EXCEPTION;
-  GumStalkerItransformer *itransformer=g_object_new(GUM_TYPE_STALKER_ITRANSFORMER,NULL);
-  transformer=GUM_STALKER_TRANSFORMER(itransformer);
-  const gchar* home=gum_get_home_path();
-  gchar* path=g_strdup_printf("%s/btrace",home);
-  GError *error=NULL;
-  GFile* file=g_file_new_for_path(path);
-  GFileOutputStream * btrace=g_file_replace(file,NULL,FALSE,G_FILE_CREATE_NONE,NULL,&error);
-  GBufferedOutputStream * btrace_buffered=g_buffered_output_stream_new(G_OUTPUT_STREAM(btrace));
-  if(error!=NULL){
-    g_warning("open file error:%s",error->message);
+  GumStalkerItransformer *itransformer =
+      g_object_new(GUM_TYPE_STALKER_ITRANSFORMER, NULL);
+
+  transformer = GUM_STALKER_TRANSFORMER(itransformer);
+  GString *path = g_string_new(g_get_tmp_dir());
+
+  // /tmp/frida/pid/tid/
+  g_string_append_printf(path, "frida/%d/%d", getpid(), thread_id);
+  if (g_mkdir_with_parents(path->str, 0755) == -1) {
+    g_error("Failed to create directory %s: %s", path->str, g_strerror(errno));
+    return JS_EXCEPTION;
+  }
+  GError *error = NULL;
+
+  GFile *file = g_file_new_build_filename(path->str, "btrace", NULL);
+
+  GFileOutputStream *btrace =
+      g_file_append_to(file, G_FILE_CREATE_NONE, NULL, &error);
+  GBufferedOutputStream *btrace_buffered = G_BUFFERED_OUTPUT_STREAM(
+      g_buffered_output_stream_new(G_OUTPUT_STREAM(btrace)));
+  if (error != NULL) {
+    g_error("open file error:%s", error->message);
     g_error_free(error);
     return JS_EXCEPTION;
   }
   g_object_unref(file);
-  g_free(path);
-  path=g_strdup_printf("%s/etrace",home);
-  file=g_file_new_for_path(path);
-  GFileOutputStream * etrace=g_file_replace(file,NULL,FALSE,G_FILE_CREATE_NONE,NULL,&error);
-  if(error!=NULL){
-    g_warning("open file error:%s",error->message);
+
+  file = g_file_new_build_filename(path->str, "etrace", NULL);
+  GFileOutputStream *etrace =
+      g_file_append_to(file, G_FILE_CREATE_NONE, NULL, &error);
+  if (error != NULL) {
+    g_error("open file error:%s", error->message);
     g_error_free(error);
     return JS_EXCEPTION;
   }
-  gum_stalker_itransformer_set_up(itransformer,n_page,btrace_buffered,etrace,dump_interval);
-  
-  if (thread_id == gum_process_get_current_thread_id ())
-  {
-    GumQuickScope * scope = core->current_scope;
+  gum_stalker_itransformer_set_up(itransformer, n_page,
+                                  G_OUTPUT_STREAM(btrace_buffered),
+                                  G_OUTPUT_STREAM(etrace), dump_interval);
+
+  if (thread_id == gum_process_get_current_thread_id()) {
+    GumQuickScope *scope = core->current_scope;
 
     scope->pending_stalker_level = 1;
 
-    g_clear_object (&scope->pending_stalker_transformer);
-    g_clear_object (&scope->pending_stalker_sink);
+    g_clear_object(&scope->pending_stalker_transformer);
+    g_clear_object(&scope->pending_stalker_sink);
     scope->pending_stalker_transformer = transformer;
     scope->pending_stalker_sink = sink;
-  }
-  else
-  {
-    gum_stalker_follow (stalker, thread_id, transformer, sink);
-    g_clear_object (&transformer);
+  } else {
+    gum_stalker_follow(stalker, thread_id, transformer, sink);
+    g_clear_object(&transformer);
   }
 
   return JS_UNDEFINED;

@@ -413,7 +413,7 @@ else
 # error GLib is static
 #endif
 '''
-  have_shared_glib = cc.compiles(glib_flavor_src, name: 'compiling with shared GLib', dependencies: [glib_dep, gmodule_dep,gio_dep])
+  have_shared_glib = cc.compiles(glib_flavor_src, name: 'compiling with shared GLib', dependencies: [glib_dep])
 endif
 if not static and have_shared_glib and not meson.is_cross_build()
   gir_scanner = find_program('g-ir-scanner', required: false)
