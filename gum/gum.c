@@ -65,7 +65,10 @@ static void gum_on_fd_closed (gint fd, const gchar * description);
 
 static void gum_on_log_message (const gchar * log_domain,
     GLogLevelFlags log_level, const gchar * message, gpointer user_data);
-
+static void gum_on_log_file (const gchar * log_domain,
+    GLogLevelFlags log_level, const gchar * message, gpointer user_data);
+static void gum_log_init (void);
+static void gum_log_deinit();
 #if defined (HAVE_LINUX) && defined (HAVE_GLIBC)
 # include <dlfcn.h>
 # define GUM_RTLD_DLOPEN 0x80000000
@@ -299,7 +302,7 @@ gum_init_embedded (void)
 #ifdef HAVE_FRIDA_GLIB
   glib_init ();
 #endif
-  g_log_set_default_handler (gum_on_log_message, NULL);
+  g_log_set_default_handler (gum_on_log_file, NULL);
   gum_do_init ();
 
   g_set_prgname ("frida");
@@ -320,7 +323,7 @@ gum_deinit_embedded (void)
 #ifdef HAVE_FRIDA_GLIB
   glib_shutdown ();
 #endif
-
+  
   g_clear_object (&gum_cached_interceptor);
 
   gum_deinit ();
@@ -872,3 +875,67 @@ gum_do_query_cpu_features (void)
 }
 
 #endif
+static FILE *gum_log_file = NULL;
+
+static void gum_log_init(void) {
+
+  const gchar *tmp_dir = g_get_tmp_dir();
+
+  // Free the previous tmp path if it was allocated by g_get_tmp_dir()
+
+  gchar *log_name = g_strdup_printf("pid_%u-uid_%u.log", getpid(), getuid());
+  gchar *log_file_path = g_build_filename(tmp_dir, "frida", log_name, NULL);
+
+  int err = g_mkdir_with_parents(log_file_path, 0700);
+  if (err == -1) {
+    gum_panic("Failed to create log directory: %s", g_strerror(errno));
+  }
+  gum_log_file = fopen(log_file_path, "a");
+  if (gum_log_file == NULL) {
+    gum_panic("Failed to open log file: %s", g_strerror(errno));
+  }
+  g_free(log_name);
+  g_free(log_file_path);
+  gum_cloak_add_file_descriptor(fileno(gum_log_file));
+}
+static void gum_log_deinit(void) {
+  if (gum_log_file != NULL) {
+    gum_cloak_remove_file_descriptor(fileno(gum_log_file));
+    fclose(gum_log_file);
+    gum_log_file = NULL;
+  }
+}
+
+static void gum_on_log_file(const gchar *log_domain, GLogLevelFlags log_level,
+                            const gchar *message, gpointer user_data) {
+  if (gum_log_file == NULL) {
+    gum_log_init();
+  }
+  // write the log message to the file
+  GError *error = NULL;
+  const gchar *severity = NULL;
+  switch (log_level & G_LOG_LEVEL_MASK) {
+  case G_LOG_LEVEL_ERROR:
+    severity = "ERROR";
+    break;
+  case G_LOG_LEVEL_CRITICAL:
+    severity = "CRITICAL";
+    break;
+  case G_LOG_LEVEL_WARNING:
+    severity = "WARNING";
+    break;
+  case G_LOG_LEVEL_MESSAGE: // MESSAGE is used for general information
+    severity = "MESSAGE";
+    break;
+  case G_LOG_LEVEL_INFO:
+    severity = "INFO";
+    break;
+  case G_LOG_LEVEL_DEBUG:
+    severity = "DEBUG";
+    break;
+  default:
+    g_assert_not_reached();
+  }
+  fprintf(gum_log_file, "[%s %s] %s\n", log_domain, severity, message);
+  fflush(gum_log_file);
+}
